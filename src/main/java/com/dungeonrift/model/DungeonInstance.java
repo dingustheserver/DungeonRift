@@ -166,10 +166,12 @@ public class DungeonInstance {
 
     public void playerEnterExtractionZone(Player player) {
         if (!alivePlayers.contains(player.getUniqueId())) return;
-        if (extractionProgress.containsKey(player.getUniqueId())) return;
 
         // Cooldown still active — throttle message to once every 5 seconds
         if (secondsElapsed < EXTRACTION_COOLDOWN_SECONDS) {
+            // If already tracking progress from before cooldown ended, clear it
+            extractionProgress.remove(player.getUniqueId());
+
             int lastMsg = lastCooldownMessage.getOrDefault(player.getUniqueId(), -10);
             if (secondsElapsed - lastMsg >= 5) {
                 int cooldownLeft = EXTRACTION_COOLDOWN_SECONDS - secondsElapsed;
@@ -183,10 +185,8 @@ public class DungeonInstance {
             return;
         }
 
+        // Cooldown open — always (re)start countdown from 0 when entering zone
         extractionProgress.put(player.getUniqueId(), 0);
-
-        int holdSecs = DungeonRift.get().getConfig().getInt("instance.extraction-hold-seconds", 10);
-        player.sendMessage("§8[§6DungeonRift§8] §eStep into the light... §7(" + holdSecs + "s)");
     }
 
     public void playerLeaveExtractionZone(Player player) {
@@ -230,6 +230,10 @@ public class DungeonInstance {
         alivePlayers.remove(player.getUniqueId());
         extractionProgress.remove(player.getUniqueId());
         bossBar.removePlayer(player);
+
+        if (player.isOnline()) {
+            player.playSound(player.getLocation(), Sound.ENTITY_WITHER_DEATH, 1.0f, 1.0f);
+        }
 
         player.getInventory().clear();
         player.sendMessage("§8[§6DungeonRift§8] §7You abandoned the rift. All loot has been lost.");

@@ -9,20 +9,12 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
-/**
- * QueueManager
- *
- * Solo: 10-second countdown displayed via title before the instance loads.
- *       Player can /rift leave during the countdown to cancel.
- * Party: immediate spawn when leader marks ready.
- */
 public class QueueManager {
 
     private final DungeonRift plugin;
 
-    private final Queue<UUID>            soloQueue      = new ConcurrentLinkedQueue<>();
-    /** Players currently in the 10-second pre-game countdown. */
-    private final Map<UUID, BukkitTask>  countdownTasks = new ConcurrentHashMap<>();
+    private final Queue<UUID>           soloQueue      = new ConcurrentLinkedQueue<>();
+    private final Map<UUID, BukkitTask> countdownTasks = new ConcurrentHashMap<>();
 
     public QueueManager(DungeonRift plugin) {
         this.plugin = plugin;
@@ -42,48 +34,48 @@ public class QueueManager {
 
         soloQueue.add(player.getUniqueId());
         player.sendMessage("§8[§6DungeonRift§8] §ePreparing your rift... §7(use §c/rift leave §7to cancel)");
-
         startCountdown(player);
     }
 
-    /**
-     * 10-second countdown shown as a title. On 0 the instance spawns.
-     */
     private void startCountdown(Player player) {
+        // Use an array so the lambda can mutate it
         final int[] secondsLeft = {10};
 
-        // Show initial title immediately
-        player.sendTitle("§6Entering Rift", "§e" + secondsLeft[0] + "s", 0, 25, 5);
+        // Show "10" immediately before the first timer tick
+        player.sendTitle("§6Entering Rift", "§e10s", 0, 25, 5);
 
-        BukkitTask task = plugin.getServer().getScheduler().runTaskTimer(plugin, () -> {
-            secondsLeft[0]--;
+        BukkitTask[] taskHolder = new BukkitTask[1];
 
+        taskHolder[0] = plugin.getServer().getScheduler().runTaskTimer(plugin, () -> {
+            // If player was dequeued (cancelled or disconnected), stop the task
             if (!player.isOnline() || !soloQueue.contains(player.getUniqueId())) {
-                // Cancelled — task will be stopped by dequeue()
+                taskHolder[0].cancel();
+                countdownTasks.remove(player.getUniqueId());
                 return;
             }
+
+            secondsLeft[0]--;
 
             if (secondsLeft[0] > 0) {
                 player.sendTitle("§6Entering Rift", "§e" + secondsLeft[0] + "s", 0, 25, 5);
             } else {
-                // Countdown finished — launch
-                player.resetTitle();
-                soloQueue.remove(player.getUniqueId());
+                // Done — cancel task first, then launch
+                taskHolder[0].cancel();
                 countdownTasks.remove(player.getUniqueId());
+                soloQueue.remove(player.getUniqueId());
+                player.resetTitle();
                 plugin.getInstanceManager().spawnInstance(List.of(player));
             }
 
-        }, 20L, 20L); // starts after 1 second, fires every second
+        }, 20L, 20L);
 
-        countdownTasks.put(player.getUniqueId(), task);
+        countdownTasks.put(player.getUniqueId(), taskHolder[0]);
     }
 
     public void dequeue(Player player) {
         if (soloQueue.remove(player.getUniqueId())) {
-            // Cancel countdown task if running
             BukkitTask task = countdownTasks.remove(player.getUniqueId());
             if (task != null) task.cancel();
-
             player.resetTitle();
             player.sendMessage("§7[DungeonRift] Queue cancelled.");
         }
@@ -100,7 +92,6 @@ public class QueueManager {
                 return;
             }
         }
-
         plugin.getServer().getScheduler().runTask(plugin, () -> {
             party.setState(Party.State.IN_GAME);
             plugin.getInstanceManager().spawnInstance(members);
@@ -109,11 +100,6 @@ public class QueueManager {
 
     // ── Status ────────────────────────────────────────────────────────────────
 
-    public boolean isQueued(UUID uuid) {
-        return soloQueue.contains(uuid);
-    }
-
-    public int getSoloQueueSize() {
-        return soloQueue.size();
-    }
+    public boolean isQueued(UUID uuid) { return soloQueue.contains(uuid); }
+    public int getSoloQueueSize()      { return soloQueue.size(); }
 }
