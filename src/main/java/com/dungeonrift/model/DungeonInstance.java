@@ -207,11 +207,7 @@ public class DungeonInstance {
         player.sendMessage("§8[§6DungeonRift§8] §a§lEXTRACTED! §r§aYour loot has been kept.");
         player.sendTitle("§a§lEXTRACTED!", "", 10, 60, 20);
 
-        // Challenge complete fanfare
-        player.playSound(player.getLocation(),
-                Sound.UI_TOAST_CHALLENGE_COMPLETE, 1.0f, 1.0f);
-
-        DungeonRift.get().getInstanceManager().returnPlayerToHub(player);
+        DungeonRift.get().getInstanceManager().returnPlayerToHub(player, true);
         checkIfEmpty();
     }
 
