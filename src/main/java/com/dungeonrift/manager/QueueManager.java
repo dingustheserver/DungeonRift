@@ -1,6 +1,7 @@
 package com.dungeonrift.manager;
 
 import com.dungeonrift.DungeonRift;
+import org.bukkit.Sound;
 import com.dungeonrift.model.Party;
 import org.bukkit.entity.Player;
 import org.bukkit.scheduler.BukkitTask;
@@ -94,7 +95,10 @@ public class QueueManager {
             secondsLeft[0]--;
 
             if (secondsLeft[0] > 0) {
-                players.forEach(p -> p.sendTitle("§6Entering Rift", "§e" + secondsLeft[0] + "s", 0, 25, 5));
+                players.forEach(p -> {
+                    p.sendTitle("§6Entering Rift", "§e" + secondsLeft[0] + "s", 0, 25, 5);
+                    p.playSound(p.getLocation(), Sound.BLOCK_NOTE_BLOCK_BASS, 1.0f, 1.0f);
+                });
             } else {
                 // Done — clean up and spawn
                 holder[0].cancel();

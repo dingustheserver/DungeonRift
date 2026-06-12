@@ -221,6 +221,11 @@ public class DungeonInstance {
         extractionProgress.remove(player.getUniqueId());
         bossBar.removePlayer(player);
         player.sendMessage("§c[DungeonRift] §4§lYou died in the rift. All loot is lost.");
+
+        // Remove from playerInstance map so the player is no longer considered
+        // "in an instance" — delayed 1 tick so the respawn event fires first.
+        DungeonRift.get().getInstanceManager().returnPlayerToHub(player);
+
         checkIfEmpty();
     }
 
