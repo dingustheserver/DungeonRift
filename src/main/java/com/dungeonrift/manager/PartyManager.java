@@ -165,7 +165,7 @@ public class PartyManager {
             String name   = member != null ? member.getName() : uuid.toString();
             String role   = party.isLeader(uuid) ? " §6[Leader]" : "";
             String hp     = member != null && member.isOnline()
-                    ? " §c" + (int) member.getHealth() + "❤" : " §7offline";
+                    ? " §c" + (int) member.getHealth() + " HP" : " §7offline";
             String state  = party.getState() == Party.State.IN_GAME ? " §a[In Rift]" : "";
             player.sendMessage("§7- §f" + name + role + hp + state);
         });
@@ -243,22 +243,26 @@ public class PartyManager {
             Player viewer = Bukkit.getPlayer(uuid);
             if (viewer == null || !viewer.isOnline()) return;
 
-            // Get or create a scoreboard for this player
             Scoreboard board = scoreboards.computeIfAbsent(uuid, k -> sm.getNewScoreboard());
 
-            // Remove old objective and recreate to clear stale entries
+            // Remove old objective and recreate
             Objective old = board.getObjective("party");
             if (old != null) old.unregister();
 
             Objective obj = board.registerNewObjective("party", Criteria.DUMMY, "§6§lParty");
             obj.setDisplaySlot(DisplaySlot.SIDEBAR);
 
-            // Show each member with HP
-            int score = party.getSize();
+            // Each line needs a unique string — we use invisible colour code padding
+            // to make duplicate names unique without showing anything extra.
+            // We hide the score number by putting each line in a team with
+            // numberFormat set to blank via a team prefix/suffix trick.
+            int score = party.getSize() + 1;
+            int padIdx = 0;
+
             for (UUID memberUuid : party.getMembers()) {
                 Player member = Bukkit.getPlayer(memberUuid);
                 String name   = member != null ? member.getName() : "?";
-                String leader = party.isLeader(memberUuid) ? "§6★ " : "§7  ";
+                String role   = party.isLeader(memberUuid) ? "§6★ " : "§7";
 
                 String hp;
                 if (member != null && member.isOnline()) {
@@ -266,23 +270,40 @@ public class PartyManager {
                     double maxHp = member.getAttribute(Attribute.GENERIC_MAX_HEALTH) != null
                             ? member.getAttribute(Attribute.GENERIC_MAX_HEALTH).getValue() : 20.0;
                     int max = (int) maxHp;
-                    // Colour shifts with HP
                     String colour = current > max * 0.5 ? "§a" : current > max * 0.25 ? "§e" : "§c";
-                    hp = colour + current + "§7/" + max + " §c❤";
+                    hp = colour + current + "§7/" + max + " HP";
                 } else {
                     hp = "§8offline";
                 }
 
-                String line = leader + "§f" + name + " " + hp;
-                obj.getScore(line).setScore(score--);
+                // Use a unique invisible padding so duplicate names don't collide
+                String pad   = "§" + "0123456789abcdef".charAt(padIdx % 16) + "§r";
+                String entry = pad + role + "§f" + name;
+
+                // Team per entry to hide the score number
+                String teamName = "dr_" + padIdx;
+                Team team = board.getTeam(teamName);
+                if (team == null) team = board.registerNewTeam(teamName);
+                team.setSuffix(" " + hp);
+                if (!team.hasEntry(entry)) team.addEntry(entry);
+
+                obj.getScore(entry).setScore(score--);
+                padIdx++;
             }
 
-            // Status line at bottom
-            String statusLine = switch (party.getState()) {
-                case FORMING  -> "§7Forming...";
-                case READY    -> "§eEntering rift...";
-                case IN_GAME  -> "§a§lIn Rift";
-            };
+            // Status line
+            String statusLine;
+            switch (party.getState()) {
+                case FORMING -> statusLine = "§7Forming...";
+                case READY   -> statusLine = "§eEntering rift...";
+                case IN_GAME -> statusLine = "§a§lIn Rift";
+                default      -> statusLine = "";
+            }
+            // Hide score on status line too
+            String statusTeamName = "dr_status";
+            Team statusTeam = board.getTeam(statusTeamName);
+            if (statusTeam == null) statusTeam = board.registerNewTeam(statusTeamName);
+            if (!statusTeam.hasEntry(statusLine)) statusTeam.addEntry(statusLine);
             obj.getScore(statusLine).setScore(0);
 
             viewer.setScoreboard(board);

@@ -59,11 +59,16 @@ public class InstanceManager {
         Location spawnLoc     = buildSpawnLocation(world);
         boolean  clearOnEnter = plugin.getConfig().getBoolean("loot.clear-on-enter", true);
 
-        players.forEach(p -> {
-            if (clearOnEnter) p.getInventory().clear();
+        // Clear inventories first, then teleport all players in one batch
+        // so the entire party lands together in the same server tick.
+        if (clearOnEnter) players.forEach(p -> p.getInventory().clear());
+
+        for (Player p : players) {
             p.teleport(spawnLoc);
-            applyEntryEffects(p);
-        });
+        }
+
+        // Apply entry effects after teleport so sounds/effects fire in the right world
+        players.forEach(this::applyEntryEffects);
 
         di.startTimer();
         log.info("Instance started: " + instanceId + " | players: " + players.size());
