@@ -263,8 +263,8 @@ public class PartyManager {
                 String hp;
                 if (member != null && member.isOnline()) {
                     int current = (int) Math.ceil(member.getHealth());
-                    double maxHp = member.getAttribute(Attribute.MAX_HEALTH) != null
-                            ? member.getAttribute(Attribute.MAX_HEALTH).getValue() : 20.0;
+                    double maxHp = member.getAttribute(Attribute.GENERIC_MAX_HEALTH) != null
+                            ? member.getAttribute(Attribute.GENERIC_MAX_HEALTH).getValue() : 20.0;
                     int max = (int) maxHp;
                     // Colour shifts with HP
                     String colour = current > max * 0.5 ? "§a" : current > max * 0.25 ? "§e" : "§c";
