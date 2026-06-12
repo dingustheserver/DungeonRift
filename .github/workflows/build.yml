@@ -2,36 +2,43 @@ name: Build DungeonRift Plugin
 
 on:
   push:
-    branches: [ "**" ]
+    branches: [ "**" ]        # build on every branch push
   pull_request:
-    branches: [ main ]
+    branches: [ main ]        # build on PRs into main
   release:
-    types: [ created ]
+    types: [ created ]        # attach jar to GitHub Releases automatically
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
+      # 1. Check out the repository
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # 2. Set up Java 21 (required for Paper 1.21.1)
       - name: Set up Java 21
         uses: actions/setup-java@v4
         with:
           java-version: '21'
           distribution: 'temurin'
-          cache: maven
+          cache: maven          # caches Maven deps between runs — speeds up builds
 
+      # 3. Build with Maven (skip tests since this is a plugin, not a library)
       - name: Build with Maven
         run: mvn package -B -DskipTests
 
+      # 4. Upload the compiled jar as a downloadable artifact
+      #    Find it under: Actions tab → click your run → Artifacts section
       - name: Upload plugin jar
         uses: actions/upload-artifact@v4
         with:
-          name: DungeonRift-${{ github.sha }}
-          path: target/*-shaded.jar
-          retention-days: 30
+          name: DungeonRift-${{ github.sha }}   # unique name per commit
+          path: target/*-shaded.jar             # the fat jar Maven Shade produces
+          retention-days: 30                    # keeps artifact for 30 days
 
+      # 5. On a GitHub Release, attach the jar to the release page automatically
       - name: Attach jar to Release
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
