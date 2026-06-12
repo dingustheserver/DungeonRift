@@ -59,18 +59,32 @@ public class InstanceManager {
         Location spawnLoc     = buildSpawnLocation(world);
         boolean  clearOnEnter = plugin.getConfig().getBoolean("loot.clear-on-enter", true);
 
-        // Clear inventories first, then teleport all players in one batch
-        // so the entire party lands together in the same server tick.
         if (clearOnEnter) players.forEach(p -> p.getInventory().clear());
 
+        // teleportAsync handles cross-world moves correctly in Paper 1.21.
+        // We fire all teleports simultaneously then apply effects once each
+        // individual future completes, so no player is left behind.
+        int[] remaining = {players.size()};
         for (Player p : players) {
-            p.teleport(spawnLoc);
+            p.teleportAsync(spawnLoc).thenAccept(success -> {
+                if (success) {
+                    // Back on main thread for Bukkit API calls
+                    plugin.getServer().getScheduler().runTask(plugin, () -> {
+                        applyEntryEffects(p);
+                    });
+                } else {
+                    log.warning("Failed to teleport " + p.getName() + " into instance " + instanceId);
+                }
+                // Start timer once ALL players have been processed
+                synchronized (remaining) {
+                    remaining[0]--;
+                    if (remaining[0] <= 0) {
+                        plugin.getServer().getScheduler().runTask(plugin, di::startTimer);
+                    }
+                }
+            });
         }
 
-        // Apply entry effects after teleport so sounds/effects fire in the right world
-        players.forEach(this::applyEntryEffects);
-
-        di.startTimer();
         log.info("Instance started: " + instanceId + " | players: " + players.size());
     }
 
