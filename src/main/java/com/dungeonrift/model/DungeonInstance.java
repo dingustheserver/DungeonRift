@@ -25,6 +25,8 @@ public class DungeonInstance {
     // ── Players ───────────────────────────────────────────────────────────────
 
     private final Set<UUID>          alivePlayers       = new HashSet<>();
+    /** Permanent record of everyone who entered — never cleared, used for party reset. */
+    private final Set<UUID>          allInstancePlayers = new HashSet<>();
     private final Map<UUID, Integer> extractionProgress = new HashMap<>();
 
     /**
@@ -51,7 +53,10 @@ public class DungeonInstance {
         this.id           = id;
         this.world        = world;
         this.templateName = templateName;
-        players.forEach(p -> alivePlayers.add(p.getUniqueId()));
+        players.forEach(p -> {
+            alivePlayers.add(p.getUniqueId());
+            allInstancePlayers.add(p.getUniqueId());
+        });
 
         secondsRemaining = DungeonRift.get().getConfig()
                 .getInt("instance.time-limit-minutes", 30) * 60;
@@ -271,15 +276,14 @@ public class DungeonInstance {
                 DungeonRift.get().getInstanceManager().returnPlayerToHub(p);
             }
         });
-        // Capture before clearing so we can notify the party
-        java.util.Set<UUID> allPlayers = new java.util.HashSet<>(alivePlayers);
         alivePlayers.clear();
         extractionProgress.clear();
         lastCooldownMessage.clear();
 
         state = State.CLOSED;
         DungeonRift.get().getInstanceManager().destroyInstance(this);
-        notifyPartyRiftComplete(allPlayers);
+        // Use allInstancePlayers — never emptied, so always has everyone
+        notifyPartyRiftComplete(allInstancePlayers);
     }
 
     /** Called by DungeonInstance when all players have left/died/extracted. */

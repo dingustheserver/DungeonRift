@@ -166,8 +166,8 @@ public class PartyManager {
             String role   = party.isLeader(uuid) ? " §6[Leader]" : "";
             String hp     = member != null && member.isOnline()
                     ? " §c" + (int) member.getHealth() : " §7offline";
-            String state  = party.getState() == Party.State.IN_GAME ? " §a[In Rift]" : "";
-            player.sendMessage("§7- §f" + name + role + hp + state);
+            
+            player.sendMessage("§7- §f" + name + role + hp);
         });
     }
 
@@ -257,9 +257,13 @@ public class PartyManager {
             for (UUID memberUuid : party.getMembers()) {
                 Player member = Bukkit.getPlayer(memberUuid);
                 String name   = member != null ? member.getName() : "?";
-                String role   = party.isLeader(memberUuid) ? "§6★ " : "§7";
 
-                // HP: colour only, no text — offline shows nothing
+                // Fixed-width prefix: leader gets gold star, members get
+                // matching-width blank so names line up. §r resets colour.
+                // Both are exactly 2 visible chars wide.
+                String prefix = party.isLeader(memberUuid) ? "§6★ §f" : "§7- §f";
+
+                // HP suffix
                 String hpSuffix;
                 if (member != null && member.isOnline()) {
                     int current = (int) Math.ceil(member.getHealth());
@@ -272,11 +276,10 @@ public class PartyManager {
                     hpSuffix = " §8offline";
                 }
 
-                // Unique invisible pad so duplicate player names don't collide
+                // Unique invisible pad per slot so entries are always unique
                 String pad   = "§" + "0123456789abcdef".charAt(padIdx % 16) + "§r";
-                String entry = pad + role + "§f" + name;
+                String entry = pad + prefix + name;
 
-                // Team hides the score number and appends HP after the name
                 String teamName = "dr_" + padIdx;
                 Team team = board.getTeam(teamName);
                 if (team == null) team = board.registerNewTeam(teamName);
@@ -287,17 +290,7 @@ public class PartyManager {
                 padIdx++;
             }
 
-            // Only show a status line when actively in rift or entering — hide when forming
-            if (party.getState() != Party.State.FORMING) {
-                String statusLine = party.getState() == Party.State.IN_GAME
-                        ? "§a§lIn Rift" : "§eEntering rift...";
-                String statusTeamName = "dr_status";
-                Team statusTeam = board.getTeam(statusTeamName);
-                if (statusTeam == null) statusTeam = board.registerNewTeam(statusTeamName);
-                if (!statusTeam.hasEntry(statusLine)) statusTeam.addEntry(statusLine);
-                obj.getScore(statusLine).setScore(0);
-            }
-
+            // No status line — cleaner look
             viewer.setScoreboard(board);
         });
     }

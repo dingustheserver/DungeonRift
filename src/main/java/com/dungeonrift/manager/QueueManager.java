@@ -27,50 +27,93 @@ public class QueueManager {
             player.sendMessage("§c[DungeonRift] You are already in a dungeon.");
             return;
         }
-        if (soloQueue.contains(player.getUniqueId())) {
+        if (soloQueue.contains(player.getUniqueId()) || countdownTasks.containsKey(player.getUniqueId())) {
             player.sendMessage("§c[DungeonRift] You are already in the queue.");
-            return;
-        }
-        if (countdownTasks.containsKey(player.getUniqueId())) {
-            player.sendMessage("§c[DungeonRift] You are already counting down.");
             return;
         }
 
         soloQueue.add(player.getUniqueId());
         player.sendMessage("§8[§6DungeonRift§8] §ePreparing your rift... §7(use §c/rift leave §7to cancel)");
-        startSoloCountdown(player);
+        startCountdown(List.of(player), null);
     }
 
-    private void startSoloCountdown(Player player) {
-        player.sendTitle("§6Entering Rift", "§e10s", 0, 25, 5);
+    // ── Party queue ───────────────────────────────────────────────────────────
 
+    public void enqueueParty(List<Player> members, Party party) {
+        for (Player p : members) {
+            if (!p.isOnline()) {
+                members.forEach(m -> m.sendMessage("§c" + p.getName() + " went offline. Queue cancelled."));
+                party.setState(Party.State.FORMING);
+                return;
+            }
+            if (plugin.getInstanceManager().isInInstance(p.getUniqueId())) {
+                members.forEach(m -> m.sendMessage("§c" + p.getName() + " is already in a dungeon. Queue cancelled."));
+                party.setState(Party.State.FORMING);
+                return;
+            }
+        }
+
+        List<Player> snapshot = new ArrayList<>(members);
+        // Track all party members in soloQueue so /rift leave works for them
+        snapshot.forEach(p -> soloQueue.add(p.getUniqueId()));
+
+        startCountdown(snapshot, party);
+    }
+
+    // ── Shared countdown (solo and party) ────────────────────────────────────
+
+    /**
+     * Runs a 10-second countdown title for all players, then spawns the instance.
+     * @param players the players to count down and spawn
+     * @param party   the party if this is a party queue, or null for solo
+     */
+    private void startCountdown(List<Player> players, Party party) {
         final int[]       secondsLeft = {10};
         final BukkitTask[] holder     = {null};
 
+        // Show initial title to all
+        players.forEach(p -> p.sendTitle("§6Entering Rift", "§e10s", 0, 25, 5));
+
         holder[0] = plugin.getServer().getScheduler().runTaskTimer(plugin, () -> {
 
-            if (!player.isOnline() || !soloQueue.contains(player.getUniqueId())) {
+            // Check if any player cancelled (dequeued)
+            boolean anyCancelled = players.stream()
+                    .anyMatch(p -> !p.isOnline() || !soloQueue.contains(p.getUniqueId()));
+
+            if (anyCancelled) {
                 holder[0].cancel();
-                countdownTasks.remove(player.getUniqueId());
+                players.forEach(p -> {
+                    countdownTasks.remove(p.getUniqueId());
+                    soloQueue.remove(p.getUniqueId());
+                    if (p.isOnline()) p.resetTitle();
+                });
+                if (party != null) party.setState(Party.State.FORMING);
                 return;
             }
 
             secondsLeft[0]--;
 
             if (secondsLeft[0] > 0) {
-                player.sendTitle("§6Entering Rift", "§e" + secondsLeft[0] + "s", 0, 25, 5);
+                players.forEach(p -> p.sendTitle("§6Entering Rift", "§e" + secondsLeft[0] + "s", 0, 25, 5));
             } else {
+                // Done — clean up and spawn
                 holder[0].cancel();
-                countdownTasks.remove(player.getUniqueId());
-                soloQueue.remove(player.getUniqueId());
-                player.resetTitle();
-                plugin.getInstanceManager().spawnInstance(List.of(player));
+                players.forEach(p -> {
+                    countdownTasks.remove(p.getUniqueId());
+                    soloQueue.remove(p.getUniqueId());
+                    p.resetTitle();
+                });
+                if (party != null) party.setState(Party.State.IN_GAME);
+                plugin.getInstanceManager().spawnInstance(players);
             }
 
         }, 20L, 20L);
 
-        countdownTasks.put(player.getUniqueId(), holder[0]);
+        // Register task for every player so /rift leave can cancel it
+        players.forEach(p -> countdownTasks.put(p.getUniqueId(), holder[0]));
     }
+
+    // ── Dequeue ───────────────────────────────────────────────────────────────
 
     public void dequeue(Player player) {
         boolean wasQueued = soloQueue.remove(player.getUniqueId());
@@ -80,45 +123,6 @@ public class QueueManager {
             player.resetTitle();
             player.sendMessage("§7[DungeonRift] Queue cancelled.");
         }
-    }
-
-    // ── Party queue ───────────────────────────────────────────────────────────
-
-    /**
-     * Party spawn — validates all members are online and not already in an
-     * instance, then spawns them all into one shared instance together.
-     * Uses a 2-tick delay after world creation to ensure the world is fully
-     * ready before teleporting all players simultaneously.
-     */
-    public void enqueueParty(List<Player> members, Party party) {
-        // Re-validate everyone is still online and free
-        for (Player p : members) {
-            if (!p.isOnline()) {
-                members.forEach(m -> m.sendMessage(
-                        "§c" + p.getName() + " went offline. Party queue cancelled."));
-                party.setState(Party.State.FORMING);
-                return;
-            }
-            if (plugin.getInstanceManager().isInInstance(p.getUniqueId())) {
-                members.forEach(m -> m.sendMessage(
-                        "§c" + p.getName() + " is already in a dungeon. Party queue cancelled."));
-                party.setState(Party.State.FORMING);
-                return;
-            }
-        }
-
-        // Snapshot the list so it can't change under us
-        List<Player> snapshot = new ArrayList<>(members);
-
-        // Show countdown to all party members
-        snapshot.forEach(p -> p.sendTitle("§6Entering Rift", "§eparty", 5, 60, 10));
-
-        // Schedule spawn on next tick — world creation blocks briefly so we
-        // do it on the main thread then teleport everyone in the same tick
-        plugin.getServer().getScheduler().runTask(plugin, () -> {
-            party.setState(Party.State.IN_GAME);
-            plugin.getInstanceManager().spawnInstance(snapshot);
-        });
     }
 
     // ── Status ────────────────────────────────────────────────────────────────
