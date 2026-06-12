@@ -35,12 +35,14 @@ public class InstanceManager {
     public void spawnInstance(List<Player> players) {
         String instanceId = "dungeon_" + UUID.randomUUID().toString().substring(0, 8);
 
+        // Clone template files synchronously
         File cloned = plugin.getTemplateManager().cloneTemplateTo(instanceId);
         if (cloned == null) {
             players.forEach(p -> p.sendMessage("§c[DungeonRift] Failed to load dungeon. Please try again."));
             return;
         }
 
+        // Create world synchronously on the main thread
         World world = new WorldCreator(instanceId).createWorld();
         if (world == null) {
             log.severe("Could not load instance world: " + instanceId);
@@ -56,52 +58,42 @@ public class InstanceManager {
         activeInstances.put(instanceId, di);
         players.forEach(p -> playerInstance.put(p.getUniqueId(), instanceId));
 
-        Location spawnLoc     = buildSpawnLocation(world);
-        boolean  clearOnEnter = plugin.getConfig().getBoolean("loot.clear-on-enter", true);
-
+        boolean clearOnEnter = plugin.getConfig().getBoolean("loot.clear-on-enter", true);
         if (clearOnEnter) players.forEach(p -> p.getInventory().clear());
 
-        // teleportAsync handles cross-world moves correctly in Paper 1.21.
-        // We fire all teleports simultaneously then apply effects once each
-        // individual future completes, so no player is left behind.
-        int[] remaining = {players.size()};
-        for (Player p : players) {
-            p.teleportAsync(spawnLoc).thenAccept(success -> {
-                if (success) {
-                    // Back on main thread for Bukkit API calls
-                    plugin.getServer().getScheduler().runTask(plugin, () -> {
-                        applyEntryEffects(p);
-                    });
-                } else {
-                    log.warning("Failed to teleport " + p.getName() + " into instance " + instanceId);
-                }
-                // Start timer once ALL players have been processed
-                synchronized (remaining) {
-                    remaining[0]--;
-                    if (remaining[0] <= 0) {
-                        plugin.getServer().getScheduler().runTask(plugin, di::startTimer);
-                    }
-                }
-            });
+        Location spawnLoc = buildSpawnLocation(world);
+
+        // Teleport each player with a 2-tick gap between them.
+        // This gives the server time to process each cross-world move
+        // before starting the next, ensuring all party members arrive.
+        // Timer starts 5 ticks after the last player is teleported.
+        List<Player> snapshot = new ArrayList<>(players);
+        for (int i = 0; i < snapshot.size(); i++) {
+            final Player p = snapshot.get(i);
+            final long delay = i * 2L; // 2 ticks between each player
+            plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
+                if (!p.isOnline()) return;
+                p.teleport(spawnLoc);
+                applyEntryEffects(p);
+                log.info("Teleported " + p.getName() + " into " + instanceId);
+            }, delay + 1L); // +1 so even first player gets at least 1 tick
         }
+
+        // Start timer after all teleports should be done (last delay + 5 ticks buffer)
+        long timerDelay = (snapshot.size() * 2L) + 5L;
+        plugin.getServer().getScheduler().runTaskLater(plugin, di::startTimer, timerDelay);
 
         log.info("Instance started: " + instanceId + " | players: " + players.size());
     }
 
-    /**
-     * Applied the moment a player loads into the dungeon:
-     *  - Blindness for 3 seconds
-     *  - Slowness V for 3 seconds
-     *  - Beacon creation sound
-     */
+    // ── Entry effects ─────────────────────────────────────────────────────────
+
     private void applyEntryEffects(Player player) {
         int durationTicks = 60; // 3 seconds
-
         player.addPotionEffect(new PotionEffect(
                 PotionEffectType.BLINDNESS, durationTicks, 0, false, false));
         player.addPotionEffect(new PotionEffect(
-                PotionEffectType.SLOWNESS, durationTicks, 4, false, false)); // amplifier 4 = Slowness V
-
+                PotionEffectType.SLOWNESS, durationTicks, 4, false, false));
         player.playSound(player.getLocation(), Sound.BLOCK_BEACON_ACTIVATE, 1.0f, 1.0f);
     }
 
@@ -131,21 +123,13 @@ public class InstanceManager {
 
     // ── Hub return ────────────────────────────────────────────────────────────
 
-    /**
-     * Returns a player to the hub.
-     * @param playSuccessSound if true, plays UI_TOAST_CHALLENGE_COMPLETE after
-     *                         they arrive — used for successful extraction only.
-     */
     public void returnPlayerToHub(Player player, boolean playSuccessSound) {
         playerInstance.remove(player.getUniqueId());
         Location hub = buildHubLocation();
-
         plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
             if (!player.isOnline()) return;
             player.teleport(hub);
-
             if (playSuccessSound) {
-                // Small extra delay so the teleport fully completes first
                 plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
                     if (player.isOnline()) {
                         player.playSound(player.getLocation(),
@@ -156,7 +140,6 @@ public class InstanceManager {
         }, 1L);
     }
 
-    /** Convenience overload — no success sound (death, forfeit, shutdown). */
     public void returnPlayerToHub(Player player) {
         returnPlayerToHub(player, false);
     }
