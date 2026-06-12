@@ -1,3 +1,26 @@
 Commands
 
-/rift queue
+ * /dungeon — admin commands.
+   
+ * /dungeon set <template>       → swap active template
+ * /dungeon list                 → list templates on disk
+ * /dungeon status               → show running instances
+ * /dungeon reload               → reload config
+ * /dungeon close <id>           → force-close an instance
+ * /dungeon setspawn             → set instance spawn to your current position
+ * /dungeon setextraction        → set extraction portal to your current position
+
+ * /rift — player commands.
+   
+ * /rift queue              → join solo queue
+ * /rift leave              → shows warning, asks for confirmation
+ * /rift leave confirm      → confirms leave (loses all loot)
+ * /rift party <sub>        → party management
+
+ * /rift party create
+ * /rift party invite <name>   §7- Invite a player");
+ * /rift party accept          §7- Accept invite");
+ * /rift party decline         §7- Decline invite");
+ * /rift party leave           §7- Leave / disband");
+ * /rift party ready           §7- Queue for dungeon");
+ * /rift party list   
