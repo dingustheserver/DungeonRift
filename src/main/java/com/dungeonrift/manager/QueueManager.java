@@ -31,6 +31,10 @@ public class QueueManager {
             player.sendMessage("§c[DungeonRift] You are already in the queue.");
             return;
         }
+        if (countdownTasks.containsKey(player.getUniqueId())) {
+            player.sendMessage("§c[DungeonRift] You are already counting down.");
+            return;
+        }
 
         soloQueue.add(player.getUniqueId());
         player.sendMessage("§8[§6DungeonRift§8] §ePreparing your rift... §7(use §c/rift leave §7to cancel)");
@@ -38,18 +42,19 @@ public class QueueManager {
     }
 
     private void startCountdown(Player player) {
-        // Use an array so the lambda can mutate it
-        final int[] secondsLeft = {10};
-
-        // Show "10" immediately before the first timer tick
+        // Show "10" immediately
         player.sendTitle("§6Entering Rift", "§e10s", 0, 25, 5);
 
-        BukkitTask[] taskHolder = new BukkitTask[1];
+        // Mutable counter — array so lambda can write to it
+        final int[] secondsLeft = {10};
+        // Holder so the lambda can cancel itself
+        final BukkitTask[] holder = {null};
 
-        taskHolder[0] = plugin.getServer().getScheduler().runTaskTimer(plugin, () -> {
-            // If player was dequeued (cancelled or disconnected), stop the task
+        holder[0] = plugin.getServer().getScheduler().runTaskTimer(plugin, () -> {
+
+            // Guard: cancelled externally (dequeue / disconnect)
             if (!player.isOnline() || !soloQueue.contains(player.getUniqueId())) {
-                taskHolder[0].cancel();
+                holder[0].cancel();
                 countdownTasks.remove(player.getUniqueId());
                 return;
             }
@@ -59,23 +64,26 @@ public class QueueManager {
             if (secondsLeft[0] > 0) {
                 player.sendTitle("§6Entering Rift", "§e" + secondsLeft[0] + "s", 0, 25, 5);
             } else {
-                // Done — cancel task first, then launch
-                taskHolder[0].cancel();
+                // Reached 0 — cancel self, clean up, spawn
+                holder[0].cancel();
                 countdownTasks.remove(player.getUniqueId());
                 soloQueue.remove(player.getUniqueId());
                 player.resetTitle();
                 plugin.getInstanceManager().spawnInstance(List.of(player));
             }
 
-        }, 20L, 20L);
+        }, 20L, 20L); // first tick at 1 second, every second after
 
-        countdownTasks.put(player.getUniqueId(), taskHolder[0]);
+        countdownTasks.put(player.getUniqueId(), holder[0]);
     }
 
     public void dequeue(Player player) {
-        if (soloQueue.remove(player.getUniqueId())) {
-            BukkitTask task = countdownTasks.remove(player.getUniqueId());
-            if (task != null) task.cancel();
+        boolean wasQueued = soloQueue.remove(player.getUniqueId());
+        BukkitTask task   = countdownTasks.remove(player.getUniqueId());
+
+        if (task != null) task.cancel();
+
+        if (wasQueued || task != null) {
             player.resetTitle();
             player.sendMessage("§7[DungeonRift] Queue cancelled.");
         }

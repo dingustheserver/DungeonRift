@@ -215,13 +215,6 @@ public class DungeonInstance {
         alivePlayers.remove(player.getUniqueId());
         extractionProgress.remove(player.getUniqueId());
         bossBar.removePlayer(player);
-
-        // Wither death sound — played at player location so others in the instance hear it too
-        if (player.isOnline()) {
-            player.playSound(player.getLocation(),
-                    Sound.ENTITY_WITHER_DEATH, 1.0f, 1.0f);
-        }
-
         player.sendMessage("§c[DungeonRift] §4§lYou died in the rift. All loot is lost.");
         checkIfEmpty();
     }
@@ -278,12 +271,28 @@ public class DungeonInstance {
                 DungeonRift.get().getInstanceManager().returnPlayerToHub(p);
             }
         });
+        // Capture before clearing so we can notify the party
+        java.util.Set<UUID> allPlayers = new java.util.HashSet<>(alivePlayers);
         alivePlayers.clear();
         extractionProgress.clear();
         lastCooldownMessage.clear();
 
         state = State.CLOSED;
         DungeonRift.get().getInstanceManager().destroyInstance(this);
+        notifyPartyRiftComplete(allPlayers);
+    }
+
+    /** Called by DungeonInstance when all players have left/died/extracted. */
+    private void notifyPartyRiftComplete(java.util.Set<UUID> allPlayers) {
+        com.dungeonrift.manager.PartyManager pm = DungeonRift.get().getPartyManager();
+        // Find a party from any of the players who were in this instance
+        for (UUID uuid : allPlayers) {
+            com.dungeonrift.model.Party party = pm.getPartyByMember(uuid);
+            if (party != null) {
+                pm.onRiftComplete(party);
+                return;
+            }
+        }
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

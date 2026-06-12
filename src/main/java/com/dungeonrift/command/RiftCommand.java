@@ -149,6 +149,7 @@ public class RiftCommand implements CommandExecutor, TabCompleter {
             case "decline" -> pm.declineInvite(player);
             case "leave"   -> pm.leaveParty(player);
             case "ready"   -> pm.queueParty(player);
+            case "list"    -> pm.listParty(player);
             default        -> sendPartyHelp(player);
         }
     }
@@ -162,7 +163,7 @@ public class RiftCommand implements CommandExecutor, TabCompleter {
         if (args.length == 2) {
             if (args[0].equalsIgnoreCase("leave"))  return List.of("confirm");
             if (args[0].equalsIgnoreCase("party"))
-                return List.of("create", "invite", "accept", "decline", "leave", "ready");
+                return List.of("create", "invite", "accept", "decline", "leave", "ready", "list");
         }
         if (args.length == 3 && args[1].equalsIgnoreCase("invite")) {
             return plugin.getServer().getOnlinePlayers().stream().map(Player::getName).toList();
@@ -188,5 +189,6 @@ public class RiftCommand implements CommandExecutor, TabCompleter {
         player.sendMessage("§e/rift party decline         §7- Decline invite");
         player.sendMessage("§e/rift party leave           §7- Leave / disband");
         player.sendMessage("§e/rift party ready           §7- Queue for dungeon");
+        player.sendMessage("§e/rift party list            §7- Show party members");
     }
 }

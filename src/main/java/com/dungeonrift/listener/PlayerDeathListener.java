@@ -2,6 +2,7 @@ package com.dungeonrift.listener;
 
 import com.dungeonrift.DungeonRift;
 import com.dungeonrift.model.DungeonInstance;
+import org.bukkit.Sound;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
@@ -10,10 +11,6 @@ import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerRespawnEvent;
 
-/**
- * Death inside an instance = lose everything.
- * Disconnecting mid-instance = treated as forfeit (loot lost).
- */
 public class PlayerDeathListener implements Listener {
 
     private final DungeonRift plugin;
@@ -31,11 +28,9 @@ public class PlayerDeathListener implements Listener {
 
         if (instance == null) return;
 
-        // Drop everything in the world — death means lose all loot
-        // Drops stay (vanilla behaviour) so other players could loot the corpse
-        // If you want no drops at all, uncomment the next two lines:
-        // event.getDrops().clear();
-        // event.setDroppedExp(0);
+        // Play wither sound immediately on death — before respawn teleport
+        player.getWorld().playSound(player.getLocation(),
+                Sound.ENTITY_WITHER_DEATH, 1.0f, 1.0f);
 
         instance.onPlayerDeath(player);
     }
@@ -62,7 +57,6 @@ public class PlayerDeathListener implements Listener {
                 .getInstanceForPlayer(player.getUniqueId());
 
         if (instance != null) {
-            // Disconnecting mid-run = forfeit, loot lost
             instance.onPlayerForfeit(player);
         }
 
