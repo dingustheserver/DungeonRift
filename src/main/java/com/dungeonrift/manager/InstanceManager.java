@@ -2,39 +2,28 @@ package com.dungeonrift.manager;
 
 import com.dungeonrift.DungeonRift;
 import com.dungeonrift.model.DungeonInstance;
+import org.bukkit.Bukkit;
 import org.bukkit.Location;
+import org.bukkit.Sound;
 import org.bukkit.World;
 import org.bukkit.WorldCreator;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.entity.Player;
-import org.bukkit.plugin.Plugin;
+import org.bukkit.potion.PotionEffect;
+import org.bukkit.potion.PotionEffectType;
 
 import java.io.File;
-import java.lang.reflect.Method;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Logger;
 
-/**
- * InstanceManager
- *
- * Spawns, tracks, and tears down dungeon instances.
- *
- * Multiverse-Core is called via reflection so we don't need it as a
- * compile-time dependency (it has no public Maven artifact).
- * If Multiverse is not installed the plugin falls back to plain Bukkit
- * world loading — fully functional either way.
- */
 public class InstanceManager {
 
     private final DungeonRift plugin;
     private final Logger      log;
 
-    /** instanceId → DungeonInstance */
     private final Map<String, DungeonInstance> activeInstances = new ConcurrentHashMap<>();
-
-    /** playerUUID → instanceId */
-    private final Map<UUID, String> playerInstance = new ConcurrentHashMap<>();
+    private final Map<UUID, String>            playerInstance  = new ConcurrentHashMap<>();
 
     public InstanceManager(DungeonRift plugin) {
         this.plugin = plugin;
@@ -46,133 +35,113 @@ public class InstanceManager {
     public void spawnInstance(List<Player> players) {
         String instanceId = "dungeon_" + UUID.randomUUID().toString().substring(0, 8);
 
-        // Clone template files
+        // Clone template files synchronously
         File cloned = plugin.getTemplateManager().cloneTemplateTo(instanceId);
         if (cloned == null) {
             players.forEach(p -> p.sendMessage("§c[DungeonRift] Failed to load dungeon. Please try again."));
             return;
         }
 
-        // Load world (Multiverse if available, otherwise plain Bukkit)
-        World world = loadWorld(instanceId);
+        // Create world synchronously on the main thread
+        World world = new WorldCreator(instanceId).createWorld();
         if (world == null) {
             log.severe("Could not load instance world: " + instanceId);
             deleteFolder(cloned);
             return;
         }
 
-        // Build instance and register players
+        log.info("Instance world loaded: " + instanceId);
+
         String templateName = plugin.getTemplateManager().getActiveTemplateName();
         DungeonInstance di  = new DungeonInstance(instanceId, world, templateName, players);
 
         activeInstances.put(instanceId, di);
         players.forEach(p -> playerInstance.put(p.getUniqueId(), instanceId));
 
-        // Teleport in and optionally clear inventories
-        Location spawnLoc   = buildSpawnLocation(world);
         boolean clearOnEnter = plugin.getConfig().getBoolean("loot.clear-on-enter", true);
+        if (clearOnEnter) players.forEach(p -> p.getInventory().clear());
 
-        players.forEach(p -> {
-            if (clearOnEnter) p.getInventory().clear();
-            p.teleport(spawnLoc);
-            p.sendMessage("§8[§6DungeonRift§8] §r"
-                    + plugin.getConfig().getString("messages.instance-starting",
-                        "§6The dungeon awaits. Prepare yourself."));
-        });
+        Location spawnLoc = buildSpawnLocation(world);
 
-        di.startTimer();
-
-        log.info("Instance spawned: " + instanceId
-                + " | template: " + templateName
-                + " | players: " + players.size());
-    }
-
-    // ── World loading (Multiverse-agnostic) ───────────────────────────────────
-
-    /**
-     * Loads a world by name.
-     * Tries Multiverse first (via reflection); falls back to Bukkit WorldCreator.
-     */
-    private World loadWorld(String worldName) {
-        // Try Multiverse via reflection — no compile-time import needed
-        Plugin mv = plugin.getServer().getPluginManager().getPlugin("Multiverse-Core");
-        if (mv != null) {
-            try {
-                Object mvWorldManager = mv.getClass()
-                        .getMethod("getMVWorldManager")
-                        .invoke(mv);
-
-                Method loadWorld = mvWorldManager.getClass()
-                        .getMethod("loadWorld", String.class);
-
-                boolean ok = (boolean) loadWorld.invoke(mvWorldManager, worldName);
-                if (ok) {
-                    World w = plugin.getServer().getWorld(worldName);
-                    if (w != null) return w;
-                }
-                log.warning("Multiverse failed to load world, falling back to Bukkit.");
-            } catch (Exception e) {
-                log.warning("Multiverse reflection failed (" + e.getMessage() + "), using Bukkit fallback.");
-            }
+        // Teleport each player with a 2-tick gap between them.
+        // This gives the server time to process each cross-world move
+        // before starting the next, ensuring all party members arrive.
+        // Timer starts 5 ticks after the last player is teleported.
+        List<Player> snapshot = new ArrayList<>(players);
+        for (int i = 0; i < snapshot.size(); i++) {
+            final Player p = snapshot.get(i);
+            final long delay = i * 2L; // 2 ticks between each player
+            plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
+                if (!p.isOnline()) return;
+                p.teleport(spawnLoc);
+                applyEntryEffects(p);
+                log.info("Teleported " + p.getName() + " into " + instanceId);
+            }, delay + 1L); // +1 so even first player gets at least 1 tick
         }
 
-        // Plain Bukkit fallback
-        return new WorldCreator(worldName).createWorld();
+        // Start timer after all teleports should be done (last delay + 5 ticks buffer)
+        long timerDelay = (snapshot.size() * 2L) + 5L;
+        plugin.getServer().getScheduler().runTaskLater(plugin, di::startTimer, timerDelay);
+
+        log.info("Instance started: " + instanceId + " | players: " + players.size());
     }
 
-    /**
-     * Unloads and deletes a world.
-     * Tries Multiverse first; falls back to Bukkit + manual folder delete.
-     */
-    private void unloadAndDeleteWorld(String worldName) {
-        Plugin mv = plugin.getServer().getPluginManager().getPlugin("Multiverse-Core");
-        if (mv != null) {
-            try {
-                Object mvWorldManager = mv.getClass()
-                        .getMethod("getMVWorldManager")
-                        .invoke(mv);
+    // ── Entry effects ─────────────────────────────────────────────────────────
 
-                Method deleteWorld = mvWorldManager.getClass()
-                        .getMethod("deleteWorld", String.class);
-
-                deleteWorld.invoke(mvWorldManager, worldName);
-                log.info("Instance world deleted via Multiverse: " + worldName);
-                return;
-            } catch (Exception e) {
-                log.warning("Multiverse delete failed, using Bukkit fallback: " + e.getMessage());
-            }
-        }
-
-        // Bukkit fallback: unload then delete folder
-        World world = plugin.getServer().getWorld(worldName);
-        if (world != null) plugin.getServer().unloadWorld(world, false);
-        deleteFolder(new File(plugin.getServer().getWorldContainer(), worldName));
-        log.info("Instance world deleted via Bukkit: " + worldName);
-    }
-
-    // ── Hub return ────────────────────────────────────────────────────────────
-
-    public void returnPlayerToHub(Player player) {
-        playerInstance.remove(player.getUniqueId());
-        Location hub = buildHubLocation();
-        plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
-            if (player.isOnline()) player.teleport(hub);
-        }, 1L);
+    private void applyEntryEffects(Player player) {
+        int durationTicks = 60; // 3 seconds
+        player.addPotionEffect(new PotionEffect(
+                PotionEffectType.BLINDNESS, durationTicks, 0, false, false));
+        player.addPotionEffect(new PotionEffect(
+                PotionEffectType.SLOWNESS, durationTicks, 4, false, false));
+        player.playSound(player.getLocation(), Sound.BLOCK_BEACON_ACTIVATE, 1.0f, 1.0f);
     }
 
     // ── Teardown ──────────────────────────────────────────────────────────────
 
     public void destroyInstance(DungeonInstance instance) {
-        String id = instance.getId();
-        activeInstances.remove(id);
-
-        plugin.getServer().getScheduler().runTaskLater(plugin, () ->
-                unloadAndDeleteWorld(id), 40L);
+        activeInstances.remove(instance.getId());
+        plugin.getServer().getScheduler().runTaskLater(plugin,
+                () -> unloadAndDeleteWorld(instance.getId()), 40L);
     }
 
     public void shutdownAll() {
         new HashSet<>(activeInstances.values())
                 .forEach(di -> di.close("Server shutdown"));
+    }
+
+    private void unloadAndDeleteWorld(String worldName) {
+        World world = Bukkit.getWorld(worldName);
+        if (world != null) {
+            Location hub = buildHubLocation();
+            world.getPlayers().forEach(p -> p.teleport(hub));
+            Bukkit.unloadWorld(world, false);
+        }
+        deleteFolder(new File(Bukkit.getWorldContainer(), worldName));
+        log.info("Instance world deleted: " + worldName);
+    }
+
+    // ── Hub return ────────────────────────────────────────────────────────────
+
+    public void returnPlayerToHub(Player player, boolean playSuccessSound) {
+        playerInstance.remove(player.getUniqueId());
+        Location hub = buildHubLocation();
+        plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
+            if (!player.isOnline()) return;
+            player.teleport(hub);
+            if (playSuccessSound) {
+                plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
+                    if (player.isOnline()) {
+                        player.playSound(player.getLocation(),
+                                Sound.UI_TOAST_CHALLENGE_COMPLETE, 1.0f, 1.0f);
+                    }
+                }, 5L);
+            }
+        }, 1L);
+    }
+
+    public void returnPlayerToHub(Player player) {
+        returnPlayerToHub(player, false);
     }
 
     // ── Lookups ───────────────────────────────────────────────────────────────
@@ -182,17 +151,13 @@ public class InstanceManager {
         return id == null ? null : activeInstances.get(id);
     }
 
-    public DungeonInstance getInstanceById(String id) {
-        return activeInstances.get(id);
-    }
+    public DungeonInstance getInstanceById(String id) { return activeInstances.get(id); }
 
     public Collection<DungeonInstance> getAllInstances() {
         return Collections.unmodifiableCollection(activeInstances.values());
     }
 
-    public boolean isInInstance(UUID uuid) {
-        return playerInstance.containsKey(uuid);
-    }
+    public boolean isInInstance(UUID uuid) { return playerInstance.containsKey(uuid); }
 
     // ── Location helpers ──────────────────────────────────────────────────────
 
@@ -209,10 +174,10 @@ public class InstanceManager {
     private Location buildHubLocation() {
         FileConfiguration cfg = plugin.getConfig();
         String hubName = cfg.getString("hub-world", "world_hub");
-        World hub = plugin.getServer().getWorld(hubName);
+        World hub = Bukkit.getWorld(hubName);
         if (hub == null) {
-            log.warning("Hub world '" + hubName + "' not found! Falling back to default world.");
-            hub = plugin.getServer().getWorlds().get(0);
+            log.warning("Hub world '" + hubName + "' not found! Using default world.");
+            hub = Bukkit.getWorlds().get(0);
         }
         return new Location(hub,
                 cfg.getDouble("hub-spawn.x",   0.5),
@@ -222,7 +187,7 @@ public class InstanceManager {
                 (float) cfg.getDouble("hub-spawn.pitch", 0));
     }
 
-    // ── File deletion ─────────────────────────────────────────────────────────
+    // ── File helpers ──────────────────────────────────────────────────────────
 
     private void deleteFolder(File folder) {
         if (!folder.exists()) return;

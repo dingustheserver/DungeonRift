@@ -147,7 +147,8 @@ public class TemplateManager {
         if (children == null) return;
 
         for (File child : children) {
-            if (child.getName().equals("session.lock")) continue; // skip lock file
+            if (child.getName().equals("session.lock")) continue;
+            if (child.getName().equals("uid.dat")) continue; // skip UID so Bukkit treats this as a new world
 
             File target = new File(dst, child.getName());
             if (child.isDirectory()) {
