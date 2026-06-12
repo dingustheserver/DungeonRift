@@ -67,9 +67,6 @@ public class InstanceManager {
         players.forEach(p -> {
             if (clearOnEnter) p.getInventory().clear();
             p.teleport(spawnLoc);
-            p.sendMessage("§8[§6DungeonRift§8] §r"
-                    + plugin.getConfig().getString("messages.instance-starting",
-                        "§6The dungeon awaits. Prepare yourself."));
         });
 
         di.startTimer();

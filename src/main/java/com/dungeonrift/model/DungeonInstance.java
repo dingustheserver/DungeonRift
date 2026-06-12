@@ -1,9 +1,8 @@
 package com.dungeonrift.model;
 
 import com.dungeonrift.DungeonRift;
-import com.dungeonrift.util.MessageUtil;
 import org.bukkit.Bukkit;
-import org.bukkit.Location;
+import org.bukkit.Sound;
 import org.bukkit.World;
 import org.bukkit.boss.BarColor;
 import org.bukkit.boss.BarStyle;
@@ -13,15 +12,6 @@ import org.bukkit.scheduler.BukkitTask;
 
 import java.util.*;
 
-/**
- * DungeonInstance — one live dungeon run.
- *
- * Changes:
- *  - Boss bar timer visible to all players in the instance
- *  - 10-minute cooldown before extraction is allowed
- *  - Extraction = keep loot, death = lose everything
- *  - /rift leave requires confirmation (handled via RiftCommand)
- */
 public class DungeonInstance {
 
     public enum State { LOADING, ACTIVE, CLOSING, CLOSED }
@@ -34,8 +24,14 @@ public class DungeonInstance {
 
     // ── Players ───────────────────────────────────────────────────────────────
 
-    private final Set<UUID>         alivePlayers       = new HashSet<>();
+    private final Set<UUID>          alivePlayers       = new HashSet<>();
     private final Map<UUID, Integer> extractionProgress = new HashMap<>();
+
+    /**
+     * Tracks the last second at which we sent a "portal not yet active" message
+     * per player, so we only send it every 5 seconds instead of every second.
+     */
+    private final Map<UUID, Integer> lastCooldownMessage = new HashMap<>();
 
     // ── Timer ─────────────────────────────────────────────────────────────────
 
@@ -43,7 +39,6 @@ public class DungeonInstance {
     private int        secondsRemaining;
     private int        secondsElapsed = 0;
 
-    /** Seconds a player must be in the instance before extraction unlocks. */
     private static final int EXTRACTION_COOLDOWN_SECONDS = 600; // 10 minutes
 
     // ── Boss bar ──────────────────────────────────────────────────────────────
@@ -61,12 +56,7 @@ public class DungeonInstance {
         secondsRemaining = DungeonRift.get().getConfig()
                 .getInt("instance.time-limit-minutes", 30) * 60;
 
-        // Create boss bar — shown to all players in this instance
-        bossBar = Bukkit.createBossBar(
-                buildBarTitle(),
-                BarColor.GREEN,
-                BarStyle.SOLID
-        );
+        bossBar = Bukkit.createBossBar(buildBarTitle(), BarColor.GREEN, BarStyle.SOLID);
     }
 
     // ── Timer ─────────────────────────────────────────────────────────────────
@@ -77,7 +67,6 @@ public class DungeonInstance {
         List<Integer> warnMinutes = plugin.getConfig()
                 .getIntegerList("instance.warnings-at-minutes");
 
-        // Add all players to boss bar
         alivePlayers.forEach(uuid -> {
             Player p = Bukkit.getPlayer(uuid);
             if (p != null) bossBar.addPlayer(p);
@@ -89,21 +78,19 @@ public class DungeonInstance {
             secondsRemaining--;
             secondsElapsed++;
 
-            // Update boss bar every second
             updateBossBar();
 
-            // Broadcast minute warnings
+            // Minute warnings
             int minutesLeft = secondsRemaining / 60;
             if (secondsRemaining % 60 == 0 && warnMinutes.contains(minutesLeft)) {
                 broadcast("§c⚠ " + minutesLeft + " minute(s) remaining!");
             }
 
-            // Show extraction unlock message at exactly 10 minutes elapsed
+            // Extraction unlock broadcast
             if (secondsElapsed == EXTRACTION_COOLDOWN_SECONDS) {
                 broadcast("§a✔ The extraction portal is now active! You may leave with your loot.");
             }
 
-            // Advance extraction countdowns
             tickExtractionProgress();
 
             if (secondsRemaining <= 0) expire();
@@ -121,21 +108,15 @@ public class DungeonInstance {
         bossBar.setProgress(progress);
         bossBar.setTitle(buildBarTitle());
 
-        // Colour shifts as time runs out
-        if (secondsRemaining <= 120) {
-            bossBar.setColor(BarColor.RED);
-        } else if (secondsRemaining <= 300) {
-            bossBar.setColor(BarColor.YELLOW);
-        } else {
-            bossBar.setColor(BarColor.GREEN);
-        }
+        if (secondsRemaining <= 120)      bossBar.setColor(BarColor.RED);
+        else if (secondsRemaining <= 300) bossBar.setColor(BarColor.YELLOW);
+        else                              bossBar.setColor(BarColor.GREEN);
     }
 
     private String buildBarTitle() {
         int mins = secondsRemaining / 60;
         int secs = secondsRemaining % 60;
 
-        // Show extraction lock status
         String extractStatus;
         if (secondsElapsed < EXTRACTION_COOLDOWN_SECONDS) {
             int cooldownLeft = EXTRACTION_COOLDOWN_SECONDS - secondsElapsed;
@@ -166,11 +147,15 @@ public class DungeonInstance {
             int remaining   = holdSeconds - secondsHeld;
 
             if (remaining >= 0) {
+                // Show countdown title — no loot text
                 player.sendTitle(
                         "§6Extracting...",
-                        "§e" + remaining + "s  §7|  §aLoot: KEPT",
+                        "§e" + remaining + "s",
                         0, 25, 5
                 );
+                // Bass note block sound on each tick
+                player.playSound(player.getLocation(),
+                        Sound.BLOCK_NOTE_BLOCK_BASS, 1.0f, 1.0f);
             }
 
             if (secondsHeld >= holdSeconds) {
@@ -183,20 +168,25 @@ public class DungeonInstance {
         if (!alivePlayers.contains(player.getUniqueId())) return;
         if (extractionProgress.containsKey(player.getUniqueId())) return;
 
-        // Check 10-minute cooldown
+        // Cooldown still active — throttle message to once every 5 seconds
         if (secondsElapsed < EXTRACTION_COOLDOWN_SECONDS) {
-            int cooldownLeft = EXTRACTION_COOLDOWN_SECONDS - secondsElapsed;
-            int mins = cooldownLeft / 60;
-            int secs = cooldownLeft % 60;
-            player.sendMessage("§c[DungeonRift] §7The extraction portal is not yet active.");
-            player.sendMessage(String.format("§7You must stay in the rift for §c%02d:%02d §7before you can extract.", mins, secs));
+            int lastMsg = lastCooldownMessage.getOrDefault(player.getUniqueId(), -10);
+            if (secondsElapsed - lastMsg >= 5) {
+                int cooldownLeft = EXTRACTION_COOLDOWN_SECONDS - secondsElapsed;
+                int mins = cooldownLeft / 60;
+                int secs = cooldownLeft % 60;
+                player.sendMessage("§c[DungeonRift] §7The extraction portal is not yet active.");
+                player.sendMessage(String.format(
+                        "§7You must stay in the rift for §c%02d:%02d §7longer.", mins, secs));
+                lastCooldownMessage.put(player.getUniqueId(), secondsElapsed);
+            }
             return;
         }
 
         extractionProgress.put(player.getUniqueId(), 0);
 
         int holdSecs = DungeonRift.get().getConfig().getInt("instance.extraction-hold-seconds", 10);
-        player.sendMessage("§8[§6DungeonRift§8] §eStep into the light... §7(" + holdSecs + "s) — §aYour loot will be kept!");
+        player.sendMessage("§8[§6DungeonRift§8] §eStep into the light... §7(" + holdSecs + "s)");
     }
 
     public void playerLeaveExtractionZone(Player player) {
@@ -208,48 +198,43 @@ public class DungeonInstance {
 
     // ── Outcomes ──────────────────────────────────────────────────────────────
 
-    /** Successful extraction — player keeps their loot. */
     private void extractPlayer(Player player) {
         extractionProgress.remove(player.getUniqueId());
         alivePlayers.remove(player.getUniqueId());
         bossBar.removePlayer(player);
 
         player.resetTitle();
-        // Loot is NOT cleared — player keeps everything
         player.sendMessage("§8[§6DungeonRift§8] §a§lEXTRACTED! §r§aYour loot has been kept.");
-        player.sendTitle("§a§lEXTRACTED!", "§7Your loot is safe.", 10, 60, 20);
+        player.sendTitle("§a§lEXTRACTED!", "", 10, 60, 20);
+
+        // Challenge complete fanfare
+        player.playSound(player.getLocation(),
+                Sound.UI_TOAST_CHALLENGE_COMPLETE, 1.0f, 1.0f);
 
         DungeonRift.get().getInstanceManager().returnPlayerToHub(player);
         checkIfEmpty();
     }
 
-    /**
-     * Player died — drop everything.
-     * "drop_in_world" is handled by vanilla; we also clear on respawn
-     * so nothing is kept if the penalty is "clear".
-     */
     public void onPlayerDeath(Player player) {
         alivePlayers.remove(player.getUniqueId());
         extractionProgress.remove(player.getUniqueId());
         bossBar.removePlayer(player);
 
-        // Always clear inventory on death — lose everything
-        // (actual drop in world happens via vanilla before this is called)
-        // PlayerDeathListener clears the drops based on config
+        // Wither death sound — played at player location so others in the instance hear it too
+        if (player.isOnline()) {
+            player.playSound(player.getLocation(),
+                    Sound.ENTITY_WITHER_DEATH, 1.0f, 1.0f);
+        }
 
         player.sendMessage("§c[DungeonRift] §4§lYou died in the rift. All loot is lost.");
         checkIfEmpty();
     }
 
-    /**
-     * Player used /rift leave (confirmed). They get nothing.
-     */
     public void onPlayerForfeit(Player player) {
         alivePlayers.remove(player.getUniqueId());
         extractionProgress.remove(player.getUniqueId());
         bossBar.removePlayer(player);
 
-        // Clear inventory — forfeiting means losing loot
         player.getInventory().clear();
         player.sendMessage("§8[§6DungeonRift§8] §7You abandoned the rift. All loot has been lost.");
 
@@ -261,7 +246,7 @@ public class DungeonInstance {
         if (alivePlayers.isEmpty()) close("All players eliminated or extracted.");
     }
 
-    // ── Timer expiry ──────────────────────────────────────────────────────────
+    // ── Expiry ────────────────────────────────────────────────────────────────
 
     private void expire() {
         broadcast("§4§lThe rift collapses! Get out!");
@@ -284,10 +269,8 @@ public class DungeonInstance {
 
         if (countdownTask != null) countdownTask.cancel();
 
-        // Remove boss bar from everyone
         bossBar.removeAll();
 
-        // Return any remaining alive players (edge case)
         new HashSet<>(alivePlayers).forEach(uuid -> {
             Player p = Bukkit.getPlayer(uuid);
             if (p != null && p.isOnline()) {
@@ -297,6 +280,7 @@ public class DungeonInstance {
         });
         alivePlayers.clear();
         extractionProgress.clear();
+        lastCooldownMessage.clear();
 
         state = State.CLOSED;
         DungeonRift.get().getInstanceManager().destroyInstance(this);
@@ -313,14 +297,14 @@ public class DungeonInstance {
 
     // ── Getters ───────────────────────────────────────────────────────────────
 
-    public String   getId()           { return id;            }
-    public World    getWorld()        { return world;         }
-    public String   getTemplateName() { return templateName;  }
-    public State    getState()        { return state;         }
-    public int      getSecondsLeft()  { return secondsRemaining; }
-    public boolean  isAlive(UUID u)   { return alivePlayers.contains(u); }
-    public boolean  inExtractionZone(UUID u) { return extractionProgress.containsKey(u); }
-    public Set<UUID> getAlivePlayers() { return Collections.unmodifiableSet(alivePlayers); }
-    public boolean  isExtractionUnlocked() { return secondsElapsed >= EXTRACTION_COOLDOWN_SECONDS; }
-    public void     addPlayerToBar(Player p) { bossBar.addPlayer(p); }
+    public String    getId()            { return id;            }
+    public World     getWorld()         { return world;         }
+    public String    getTemplateName()  { return templateName;  }
+    public State     getState()         { return state;         }
+    public int       getSecondsLeft()   { return secondsRemaining; }
+    public boolean   isAlive(UUID u)    { return alivePlayers.contains(u); }
+    public boolean   inExtractionZone(UUID u) { return extractionProgress.containsKey(u); }
+    public Set<UUID> getAlivePlayers()  { return Collections.unmodifiableSet(alivePlayers); }
+    public boolean   isExtractionUnlocked() { return secondsElapsed >= EXTRACTION_COOLDOWN_SECONDS; }
+    public void      addPlayerToBar(Player p) { bossBar.addPlayer(p); }
 }
