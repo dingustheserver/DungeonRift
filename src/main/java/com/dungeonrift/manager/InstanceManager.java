@@ -2,15 +2,14 @@ package com.dungeonrift.manager;
 
 import com.dungeonrift.DungeonRift;
 import com.dungeonrift.model.DungeonInstance;
+import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.WorldCreator;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.entity.Player;
-import org.bukkit.plugin.Plugin;
 
 import java.io.File;
-import java.lang.reflect.Method;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Logger;
@@ -18,8 +17,8 @@ import java.util.logging.Logger;
 /**
  * InstanceManager
  *
- * Supports Multiverse-Core v4.x AND v5.x via reflection.
- * Falls back to plain Bukkit WorldCreator if neither works.
+ * Loads worlds via Bukkit WorldCreator (plain, no Multiverse needed).
+ * Multiverse is used only for world cleanup on teardown.
  */
 public class InstanceManager {
 
@@ -45,12 +44,16 @@ public class InstanceManager {
             return;
         }
 
-        World world = loadWorld(instanceId);
+        // Load via plain Bukkit — uid.dat was excluded from clone so no duplicate error
+        World world = new WorldCreator(instanceId).createWorld();
+
         if (world == null) {
             log.severe("Could not load instance world: " + instanceId);
             deleteFolder(cloned);
             return;
         }
+
+        log.info("Instance world loaded: " + instanceId);
 
         String templateName = plugin.getTemplateManager().getActiveTemplateName();
         DungeonInstance di  = new DungeonInstance(instanceId, world, templateName, players);
@@ -58,7 +61,7 @@ public class InstanceManager {
         activeInstances.put(instanceId, di);
         players.forEach(p -> playerInstance.put(p.getUniqueId(), instanceId));
 
-        Location spawnLoc    = buildSpawnLocation(world);
+        Location spawnLoc     = buildSpawnLocation(world);
         boolean  clearOnEnter = plugin.getConfig().getBoolean("loot.clear-on-enter", true);
 
         players.forEach(p -> {
@@ -70,108 +73,7 @@ public class InstanceManager {
         });
 
         di.startTimer();
-        log.info("Instance spawned: " + instanceId + " | players: " + players.size());
-    }
-
-    // ── World loading ─────────────────────────────────────────────────────────
-
-    private World loadWorld(String worldName) {
-        Plugin mv = plugin.getServer().getPluginManager().getPlugin("Multiverse-Core");
-
-        if (mv != null) {
-            String mvVersion = mv.getDescription().getVersion();
-            log.info("Detected Multiverse-Core v" + mvVersion);
-
-            // Try MV5 API first: getMVWorldManager() → loadWorld(String)
-            try {
-                Object api = mv.getClass().getMethod("getMVWorldManager").invoke(mv);
-                Method load = findMethod(api.getClass(), "loadWorld", String.class);
-                if (load != null) {
-                    Object result = load.invoke(api, worldName);
-                    World w = plugin.getServer().getWorld(worldName);
-                    if (w != null) { log.info("Loaded via MV5 API"); return w; }
-                }
-            } catch (Exception ignored) {}
-
-            // Try MV5 API variant: getWorldManager()
-            try {
-                Object api = mv.getClass().getMethod("getWorldManager").invoke(mv);
-                Method load = findMethod(api.getClass(), "loadWorld", String.class);
-                if (load != null) {
-                    load.invoke(api, worldName);
-                    World w = plugin.getServer().getWorld(worldName);
-                    if (w != null) { log.info("Loaded via MV5 getWorldManager API"); return w; }
-                }
-            } catch (Exception ignored) {}
-
-            // Try MV4 API: getMVWorldManager() → addWorld(String, ...)
-            try {
-                Object wm = mv.getClass().getMethod("getMVWorldManager").invoke(mv);
-                // MV4 addWorld: (name, env, seed, type, gen, adjustSpawn)
-                Method addWorld = findMethod(wm.getClass(), "addWorld",
-                        String.class, World.Environment.class, String.class,
-                        org.bukkit.WorldType.class, Boolean.class, String.class);
-                if (addWorld != null) {
-                    addWorld.invoke(wm, worldName,
-                            World.Environment.NORMAL, null,
-                            org.bukkit.WorldType.NORMAL, false, null);
-                    World w = plugin.getServer().getWorld(worldName);
-                    if (w != null) { log.info("Loaded via MV4 addWorld API"); return w; }
-                }
-            } catch (Exception ignored) {}
-
-            log.warning("All Multiverse reflection attempts failed — falling back to Bukkit.");
-        }
-
-        // Plain Bukkit fallback — always works
-        World w = new WorldCreator(worldName).createWorld();
-        if (w != null) log.info("Loaded world via Bukkit WorldCreator.");
-        return w;
-    }
-
-    private void unloadAndDeleteWorld(String worldName) {
-        Plugin mv = plugin.getServer().getPluginManager().getPlugin("Multiverse-Core");
-
-        if (mv != null) {
-            // MV5: deleteWorld(String)
-            try {
-                Object api = mv.getClass().getMethod("getMVWorldManager").invoke(mv);
-                Method del = findMethod(api.getClass(), "deleteWorld", String.class);
-                if (del == null) del = findMethod(api.getClass(), "removeWorld", String.class);
-                if (del != null) {
-                    del.invoke(api, worldName);
-                    log.info("Deleted instance via Multiverse: " + worldName);
-                    return;
-                }
-            } catch (Exception ignored) {}
-
-            try {
-                Object api = mv.getClass().getMethod("getWorldManager").invoke(mv);
-                Method del = findMethod(api.getClass(), "deleteWorld", String.class);
-                if (del == null) del = findMethod(api.getClass(), "removeWorld", String.class);
-                if (del != null) {
-                    del.invoke(api, worldName);
-                    log.info("Deleted instance via MV5 getWorldManager: " + worldName);
-                    return;
-                }
-            } catch (Exception ignored) {}
-        }
-
-        // Bukkit fallback
-        World world = plugin.getServer().getWorld(worldName);
-        if (world != null) plugin.getServer().unloadWorld(world, false);
-        deleteFolder(new File(plugin.getServer().getWorldContainer(), worldName));
-        log.info("Deleted instance via Bukkit: " + worldName);
-    }
-
-    // ── Hub return ────────────────────────────────────────────────────────────
-
-    public void returnPlayerToHub(Player player) {
-        playerInstance.remove(player.getUniqueId());
-        Location hub = buildHubLocation();
-        plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
-            if (player.isOnline()) player.teleport(hub);
-        }, 1L);
+        log.info("Instance started: " + instanceId + " | players: " + players.size());
     }
 
     // ── Teardown ──────────────────────────────────────────────────────────────
@@ -185,6 +87,28 @@ public class InstanceManager {
     public void shutdownAll() {
         new HashSet<>(activeInstances.values())
                 .forEach(di -> di.close("Server shutdown"));
+    }
+
+    private void unloadAndDeleteWorld(String worldName) {
+        World world = Bukkit.getWorld(worldName);
+        if (world != null) {
+            // Move any lingering players out first
+            Location hub = buildHubLocation();
+            world.getPlayers().forEach(p -> p.teleport(hub));
+            Bukkit.unloadWorld(world, false);
+        }
+        deleteFolder(new File(Bukkit.getWorldContainer(), worldName));
+        log.info("Instance world deleted: " + worldName);
+    }
+
+    // ── Hub return ────────────────────────────────────────────────────────────
+
+    public void returnPlayerToHub(Player player) {
+        playerInstance.remove(player.getUniqueId());
+        Location hub = buildHubLocation();
+        plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
+            if (player.isOnline()) player.teleport(hub);
+        }, 1L);
     }
 
     // ── Lookups ───────────────────────────────────────────────────────────────
@@ -202,22 +126,7 @@ public class InstanceManager {
 
     public boolean isInInstance(UUID uuid) { return playerInstance.containsKey(uuid); }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
-
-    /** Search a class hierarchy for a method by name and parameter types. */
-    private Method findMethod(Class<?> clazz, String name, Class<?>... params) {
-        Class<?> c = clazz;
-        while (c != null) {
-            try { return c.getMethod(name, params); } catch (NoSuchMethodException ignored) {}
-            try { return c.getDeclaredMethod(name, params); } catch (NoSuchMethodException ignored) {}
-            // Also try with no params if parameterised version not found
-            for (Method m : c.getMethods()) {
-                if (m.getName().equals(name)) return m;
-            }
-            c = c.getSuperclass();
-        }
-        return null;
-    }
+    // ── Location helpers ──────────────────────────────────────────────────────
 
     private Location buildSpawnLocation(World world) {
         FileConfiguration cfg = plugin.getConfig();
@@ -232,10 +141,10 @@ public class InstanceManager {
     private Location buildHubLocation() {
         FileConfiguration cfg = plugin.getConfig();
         String hubName = cfg.getString("hub-world", "world_hub");
-        World hub = plugin.getServer().getWorld(hubName);
+        World hub = Bukkit.getWorld(hubName);
         if (hub == null) {
             log.warning("Hub world '" + hubName + "' not found! Using default world.");
-            hub = plugin.getServer().getWorlds().get(0);
+            hub = Bukkit.getWorlds().get(0);
         }
         return new Location(hub,
                 cfg.getDouble("hub-spawn.x",   0.5),
@@ -244,6 +153,8 @@ public class InstanceManager {
                 (float) cfg.getDouble("hub-spawn.yaw",   0),
                 (float) cfg.getDouble("hub-spawn.pitch", 0));
     }
+
+    // ── File helpers ──────────────────────────────────────────────────────────
 
     private void deleteFolder(File folder) {
         if (!folder.exists()) return;
