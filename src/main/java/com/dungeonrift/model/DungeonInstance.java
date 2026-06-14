@@ -6,7 +6,6 @@ import org.bukkit.boss.BarColor;
 import org.bukkit.boss.BarStyle;
 import org.bukkit.boss.BossBar;
 import org.bukkit.entity.Player;
-import org.bukkit.inventory.ItemStack;
 import org.bukkit.scheduler.BukkitTask;
 
 import java.util.*;
@@ -26,8 +25,6 @@ public class DungeonInstance {
     private final Set<UUID>          allInstancePlayers  = new HashSet<>();
     private final Map<UUID, Integer> extractionProgress  = new HashMap<>();
     private final Map<UUID, Integer> lastCooldownMessage = new HashMap<>();
-    private final Map<UUID, Integer> extractionEntries   = new HashMap<>();
-    private static final int         MAX_EXTRACTION_ENTRIES = 3;
 
     // ── Timer ─────────────────────────────────────────────────────────────────
 
@@ -35,29 +32,37 @@ public class DungeonInstance {
     private int        secondsRemaining;
     private int        secondsElapsed = 0;
 
-    // ── Safety pause ──────────────────────────────────────────────────────────
+    // ── Extraction safety ─────────────────────────────────────────────────────
+    //
+    // Simple, abuse-proof design:
+    //   - Once the timer drops to <= safetyThreshold seconds, the "safety window" opens.
+    //   - The first time a player enters the zone in this window, the timer pauses.
+    //   - If they leave, the timer resumes immediately (no grace, no reset).
+    //   - Each re-entry into the zone while <= safetyThreshold re-pauses the timer.
+    //   - After MAX_ZONE_EXITS zone exits within the safety window, no more pauses.
+    //   - Players are warned when they have 1 exit left.
+    //
+    private static final int MAX_ZONE_EXITS = 3;
 
+    /** How many times the player has LEFT the zone during the safety window. */
+    private final Map<UUID, Integer> safetyZoneExits = new HashMap<>();
+
+    /** Whether the timer is currently paused for a player in the zone. */
     private boolean timerPaused     = false;
     private UUID    pausedForPlayer = null;
-
-    /**
-     * Counts down during the grace period (player left zone while paused).
-     * -1 = grace not active. 0 = grace just expired.
-     */
-    private int graceCountdown = -1;
-
-    /** Total times grace has been spent (counts a full grace expiry as one use). */
-    private int pauseExitCount  = 0;
-    private static final int MAX_PAUSE_EXITS = 3;
 
     // ── Collapse ──────────────────────────────────────────────────────────────
 
     private static final int EXTRACTION_COOLDOWN_SECONDS = 600;
 
-    /** Seconds remaining when collapse sequence starts — set at construction. */
     private final int collapseStartSeconds;
     private int       collapseTickCounter = 0;
     private boolean   pigStepPlaying      = false;
+
+    // ── Vein generation ───────────────────────────────────────────────────────
+
+    /** Tracks seconds at which veins have already been spawned to avoid duplicates. */
+    private final Set<Integer> veinSpawnedAt = new HashSet<>();
 
     // ── Boss bar ──────────────────────────────────────────────────────────────
 
@@ -73,15 +78,11 @@ public class DungeonInstance {
             alivePlayers.add(p.getUniqueId());
             allInstancePlayers.add(p.getUniqueId());
         });
-
         secondsRemaining = DungeonRift.get().getConfig()
                 .getInt("instance.time-limit-minutes", 30) * 60;
-
-        // Read collapse start once — used both as trigger and for intensity calc
         int collapseMinutes = DungeonRift.get().getConfig()
                 .getInt("instance.collapse.start-at-minutes-remaining", 2);
-        collapseStartSeconds = collapseMinutes * 60 + 30; // e.g. 2m → 2:30
-
+        collapseStartSeconds = collapseMinutes * 60 + 30;
         bossBar = Bukkit.createBossBar(buildBarTitle(), BarColor.GREEN, BarStyle.SOLID);
     }
 
@@ -89,11 +90,10 @@ public class DungeonInstance {
 
     public void startTimer() {
         state = State.ACTIVE;
-        DungeonRift plugin = DungeonRift.get();
-
-        List<Integer> warnMinutes   = plugin.getConfig().getIntegerList("instance.warnings-at-minutes");
-        boolean safetyEnabled       = plugin.getConfig().getBoolean("extraction-safety.enabled", true);
-        int     safetyThreshold     = plugin.getConfig().getInt("extraction-safety.pause-at-seconds-remaining", 10);
+        DungeonRift plugin  = DungeonRift.get();
+        List<Integer> warns = plugin.getConfig().getIntegerList("instance.warnings-at-minutes");
+        boolean safetyOn    = plugin.getConfig().getBoolean("extraction-safety.enabled", true);
+        int safetyThreshold = plugin.getConfig().getInt("extraction-safety.pause-at-seconds-remaining", 10);
 
         alivePlayers.forEach(uuid -> {
             Player p = Bukkit.getPlayer(uuid);
@@ -102,62 +102,34 @@ public class DungeonInstance {
 
         countdownTask = plugin.getServer().getScheduler().runTaskTimer(plugin, () -> {
 
-            // ── Collapse always runs — even when timer is paused ───────────
-            // This ensures the collapse sequence never freezes during extraction.
-            if (secondsRemaining <= collapseStartSeconds) {
-                tickCollapse();
-            }
+            // ── Collapse always fires first — never blocked by pause ────────
+            if (secondsRemaining <= collapseStartSeconds) tickCollapse();
 
-            // ── Safety pause state machine ─────────────────────────────────
-            if (timerPaused) {
+            // ── Safety pause ───────────────────────────────────────────────
+            if (timerPaused && safetyOn) {
                 Player pp      = pausedForPlayer != null ? Bukkit.getPlayer(pausedForPlayer) : null;
                 boolean inZone = pp != null && extractionProgress.containsKey(pausedForPlayer);
 
                 if (inZone) {
-                    // In zone — keep timer paused, progress extraction
                     updateBossBar();
                     tickExtractionProgress();
-                    return;
+                    return; // hold the pause
                 }
 
-                // ── Grace period ───────────────────────────────────────────
-                if (graceCountdown < 0) {
-                    // First tick after leaving — initialise grace
-                    graceCountdown = 5;
-                    if (pp != null) {
-                        pp.sendMessage("§c[DungeonRift] You left the extraction zone!");
-                        pp.sendMessage("§7Return within §c5 seconds §7or the timer resumes!");
-                    }
-                }
-
-                if (graceCountdown > 0) {
-                    if (pp != null) pp.sendTitle("§cReturn to portal!", "§e" + graceCountdown + "s", 0, 25, 5);
-                    graceCountdown--;
-                    updateBossBar();
-                    return; // still paused
-                }
-
-                // Grace elapsed — release pause
+                // Player left zone — immediately resume timer (no grace)
                 timerPaused     = false;
                 pausedForPlayer = null;
-                graceCountdown  = -1;
-                pauseExitCount++;
-                if (pauseExitCount >= MAX_PAUSE_EXITS) {
-                    broadcast("§c⚠ Emergency pauses exhausted. Timer will no longer pause!");
-                } else {
-                    broadcast("§c⚠ Emergency pause expired. Timer resumed! §7(" + (MAX_PAUSE_EXITS - pauseExitCount) + " remaining)");
-                }
             }
 
-            // ── Normal tick ────────────────────────────────────────────────
+            // ── Normal timer tick ──────────────────────────────────────────
             secondsRemaining--;
             secondsElapsed++;
             updateBossBar();
 
-            // Minute warnings + XP sound
-            int minutesLeft = secondsRemaining / 60;
-            if (secondsRemaining % 60 == 0 && warnMinutes.contains(minutesLeft)) {
-                broadcast("§c⚠ " + minutesLeft + " minute(s) remaining!");
+            // Minute warnings + XP ping
+            int minsLeft = secondsRemaining / 60;
+            if (secondsRemaining % 60 == 0 && warns.contains(minsLeft)) {
+                broadcast("§c⚠ " + minsLeft + " minute(s) remaining!");
                 alivePlayers.forEach(uuid -> {
                     Player pp = Bukkit.getPlayer(uuid);
                     if (pp != null) pp.playSound(pp.getLocation(),
@@ -169,21 +141,19 @@ public class DungeonInstance {
                 broadcast("§a✔ The extraction portal is now active!");
             }
 
-            // ── Safety net ─────────────────────────────────────────────────
-            if (safetyEnabled && pauseExitCount < MAX_PAUSE_EXITS
-                    && secondsRemaining > 0 && secondsRemaining <= safetyThreshold) {
+            // ── Safety re-pause check ──────────────────────────────────────
+            // Each second the timer is <= threshold and a player is in the zone,
+            // re-pause — unless they've already used all their exits.
+            if (safetyOn && secondsRemaining > 0 && secondsRemaining <= safetyThreshold) {
                 for (UUID uuid : alivePlayers) {
-                    if (extractionProgress.containsKey(uuid)) {
-                        timerPaused     = true;
-                        pausedForPlayer = uuid;
-                        graceCountdown  = -1;
-                        Player pp = Bukkit.getPlayer(uuid);
-                        if (pp != null) pp.sendMessage("§a[DungeonRift] §eTimer paused! §7("
-                                + (MAX_PAUSE_EXITS - pauseExitCount) + " pause(s) remaining)");
-                        updateBossBar();
-                        tickExtractionProgress();
-                        return;
-                    }
+                    if (!extractionProgress.containsKey(uuid)) continue;
+                    int exits = safetyZoneExits.getOrDefault(uuid, 0);
+                    if (exits >= MAX_ZONE_EXITS) continue; // no more pauses for them
+                    timerPaused     = true;
+                    pausedForPlayer = uuid;
+                    updateBossBar();
+                    tickExtractionProgress();
+                    return;
                 }
             }
 
@@ -197,47 +167,43 @@ public class DungeonInstance {
 
     private void tickCollapse() {
         collapseTickCounter++;
-        DungeonRift plugin    = DungeonRift.get();
-        boolean soundsEnabled    = plugin.getConfig().getBoolean("instance.collapse.sounds-enabled",    true);
-        boolean weatherEnabled   = plugin.getConfig().getBoolean("instance.collapse.weather-enabled",   true);
-        boolean lightningEnabled = plugin.getConfig().getBoolean("instance.collapse.lightning-enabled", true);
+        DungeonRift plugin     = DungeonRift.get();
+        boolean soundsOn       = plugin.getConfig().getBoolean("instance.collapse.sounds-enabled",    true);
+        boolean weatherOn      = plugin.getConfig().getBoolean("instance.collapse.weather-enabled",   true);
+        boolean lightningOn    = plugin.getConfig().getBoolean("instance.collapse.lightning-enabled", true);
 
-        // intensity: 0.0 at collapse start → 1.0 at 0 seconds
         double intensity = collapseStartSeconds > 0
                 ? Math.min(1.0, 1.0 - ((double) secondsRemaining / collapseStartSeconds))
                 : 1.0;
 
-        // ── Pig Step — play to each player client-side once ────────────────
-        if (!pigStepPlaying && soundsEnabled) {
+        // ── Pig Step — plays in the player's head, follows them ────────────
+        if (!pigStepPlaying && soundsOn) {
             pigStepPlaying = true;
             alivePlayers.forEach(uuid -> {
                 Player p = Bukkit.getPlayer(uuid);
-                if (p != null) {
-                    // Stop any existing music first, then play at the player's
-                    // own ears (category RECORDS so it sounds like a disc, not ambient)
-                    p.stopSound(Sound.MUSIC_DISC_PIGSTEP, SoundCategory.RECORDS);
-                    p.playSound(p.getLocation(), Sound.MUSIC_DISC_PIGSTEP,
-                            SoundCategory.RECORDS, 1.0f, 1.0f);
-                }
+                if (p == null) return;
+                // MASTER category plays client-side at the player's ear position
+                // regardless of where they move — like a music disc to the client.
+                p.stopSound(Sound.MUSIC_DISC_PIGSTEP, SoundCategory.MASTER);
+                p.playSound(p.getLocation(), Sound.MUSIC_DISC_PIGSTEP,
+                        SoundCategory.MASTER, 2.0f, 1.0f);
             });
         }
 
         // ── Storm ─────────────────────────────────────────────────────────
-        if (weatherEnabled) {
+        if (weatherOn) {
             world.setStorm(true);
             world.setThundering(true);
             world.setWeatherDuration(600);
         }
 
-        // ── Crumbling sounds ─────────────────────────────────────────────
+        // ── Crumbling sounds ──────────────────────────────────────────────
         int soundInterval = Math.max(1, (int) (5 - intensity * 4));
-        if (soundsEnabled && collapseTickCounter % soundInterval == 0) {
-            Sound[] sounds = {
-                Sound.BLOCK_STONE_BREAK,          Sound.BLOCK_GRAVEL_BREAK,
-                Sound.BLOCK_ANCIENT_DEBRIS_BREAK,  Sound.BLOCK_DEEPSLATE_BREAK,
-                Sound.ENTITY_GENERIC_EXPLODE
-            };
-            Sound s   = sounds[collapseTickCounter % sounds.length];
+        if (soundsOn && collapseTickCounter % soundInterval == 0) {
+            Sound[] sounds = { Sound.BLOCK_STONE_BREAK, Sound.BLOCK_GRAVEL_BREAK,
+                               Sound.BLOCK_ANCIENT_DEBRIS_BREAK, Sound.BLOCK_DEEPSLATE_BREAK,
+                               Sound.ENTITY_GENERIC_EXPLODE };
+            Sound s = sounds[collapseTickCounter % sounds.length];
             float vol = (float) (0.5 + intensity * 0.5);
             alivePlayers.forEach(uuid -> {
                 Player p = Bukkit.getPlayer(uuid);
@@ -245,9 +211,9 @@ public class DungeonInstance {
             });
         }
 
-        // ── Explosions ───────────────────────────────────────────────────
-        int explosionInterval = Math.max(2, (int) (20 - intensity * 18));
-        if (soundsEnabled && collapseTickCounter % explosionInterval == 0) {
+        // ── Explosions ────────────────────────────────────────────────────
+        int explodeInterval = Math.max(2, (int) (20 - intensity * 18));
+        if (soundsOn && collapseTickCounter % explodeInterval == 0) {
             Random rng = new Random();
             alivePlayers.forEach(uuid -> {
                 Player p = Bukkit.getPlayer(uuid);
@@ -258,9 +224,9 @@ public class DungeonInstance {
             });
         }
 
-        // ── Lightning — creates small holes + magma scatter ───────────────
+        // ── Lightning + ground cracking ───────────────────────────────────
         int lightningInterval = Math.max(2, (int) (8 - intensity * 6));
-        if (lightningEnabled && collapseTickCounter % lightningInterval == 0) {
+        if (lightningOn && collapseTickCounter % lightningInterval == 0) {
             Random rng    = new Random();
             int    strikes = 1 + (int) (intensity * 2);
             for (int i = 0; i < strikes; i++) {
@@ -277,7 +243,7 @@ public class DungeonInstance {
             }
         }
 
-        // ── Darkness ─────────────────────────────────────────────────────
+        // ── Darkness ──────────────────────────────────────────────────────
         int darkInterval = Math.max(3, (int) (15 - intensity * 12));
         if (collapseTickCounter % darkInterval == 0) {
             int amp = intensity > 0.7 ? 1 : 0;
@@ -288,57 +254,161 @@ public class DungeonInstance {
             });
         }
 
+        // ── Magma + skulk veins — appear at 90s, 60s, 30s once each ───────
+        spawnVeinAtThreshold(150, intensity);
+        spawnVeinAtThreshold(90,  intensity);
+        spawnVeinAtThreshold(60,  intensity);
+        spawnVeinAtThreshold(30,  intensity);
+
         // ── Milestone broadcasts ──────────────────────────────────────────
         if (secondsRemaining == 60) broadcast("§4§l⚠ THE RIFT IS COLLAPSING! ⚠");
         if (secondsRemaining == 30) broadcast("§4§l☠ 30 SECONDS — GET OUT OF THE RIFT! ☠");
         if (secondsRemaining == 10) broadcast("§4§l☠ 10 SECONDS! ☠");
     }
 
+    // ── Vein generation ───────────────────────────────────────────────────────
+
+    private void spawnVeinAtThreshold(int threshold, double intensity) {
+        if (secondsRemaining > threshold) return;
+        if (veinSpawnedAt.contains(threshold)) return;
+        veinSpawnedAt.add(threshold);
+
+        // Spawn 2–4 veins spread around alive players
+        Random rng       = new Random();
+        int    veinCount = 2 + (int) (intensity * 2);
+
+        alivePlayers.forEach(uuid -> {
+            Player p = Bukkit.getPlayer(uuid);
+            if (p == null) return;
+            for (int v = 0; v < veinCount; v++) {
+                double ox = (rng.nextDouble() - 0.5) * 80;
+                double oz = (rng.nextDouble() - 0.5) * 80;
+                Location origin = p.getLocation().add(ox, 0, oz);
+                // Async world gen to avoid server tick spike
+                DungeonRift.get().getServer().getScheduler().runTaskLater(
+                        DungeonRift.get(),
+                        () -> generateVein(origin, threshold, rng),
+                        (long) (v * 4)); // stagger 4 ticks apart
+            }
+        });
+    }
+
     /**
-     * Creates a small crater + magma scatter around a lightning impact point.
-     * Removes 1–3 surface blocks in a tiny radius to make a hole,
-     * then scatters magma in a wider ring.
+     * Generates a branching vein of magma and skulk blocks along the surface.
+     * The vein walks randomly in a direction, placing blocks at surface level,
+     * making the terrain look like it's splitting apart.
+     *
+     * @param origin     Starting location
+     * @param threshold  The time threshold (controls material mix)
+     * @param rng        Shared Random instance
      */
+    private void generateVein(Location origin, int threshold, Random rng) {
+        if (origin.getWorld() == null) return;
+
+        // Material weighting: earlier (150s) = mostly skulk; later (30s) = mostly magma
+        boolean moreMagma = threshold <= 60;
+
+        // Walk the vein: 8–20 steps in a semi-random direction
+        int steps = 8 + rng.nextInt(13);
+        double dirX = (rng.nextDouble() - 0.5) * 2;
+        double dirZ = (rng.nextDouble() - 0.5) * 2;
+
+        Location current = origin.clone();
+        for (int step = 0; step < steps; step++) {
+            // Drift the direction slightly each step for organic feel
+            dirX += (rng.nextDouble() - 0.5) * 0.4;
+            dirZ += (rng.nextDouble() - 0.5) * 0.4;
+
+            current = current.add(dirX, 0, dirZ);
+
+            // Find surface
+            Location surface = world.getHighestBlockAt(current).getLocation();
+
+            // Place primary block
+            placeVeinBlock(surface, moreMagma, rng);
+
+            // Widen vein — place 1–2 blocks on each side perpendicular to travel
+            int width = 1 + (step % 3 == 0 ? 1 : 0); // occasionally wider
+            for (int w = 1; w <= width; w++) {
+                placeVeinBlock(surface.clone().add(dirZ, 0, -dirX * w), moreMagma, rng);
+                placeVeinBlock(surface.clone().add(-dirZ, 0, dirX * w), moreMagma, rng);
+            }
+
+            // Occasional branch — 20% chance past step 4
+            if (step > 4 && rng.nextDouble() < 0.2) {
+                double bx = (rng.nextDouble() - 0.5) * 2;
+                double bz = (rng.nextDouble() - 0.5) * 2;
+                Location branch = surface.clone();
+                int branchLen   = 3 + rng.nextInt(5);
+                for (int b = 0; b < branchLen; b++) {
+                    branch = branch.add(bx, 0, bz);
+                    placeVeinBlock(world.getHighestBlockAt(branch).getLocation(), moreMagma, rng);
+                }
+            }
+        }
+    }
+
+    private void placeVeinBlock(Location loc, boolean moreMagma, Random rng) {
+        if (loc.getWorld() == null) return;
+        Material m = loc.getBlock().getType();
+        if (!m.isSolid() || m == Material.BEDROCK
+                || m.name().contains("LOG")   || m.name().contains("LEAVES")
+                || m.name().contains("CHEST") || m.name().contains("SIGN")
+                || m.name().contains("SKULL") || m == Material.MAGMA_BLOCK
+                || m == Material.SCULK) return;
+
+        double roll = rng.nextDouble();
+        Material place;
+        if (moreMagma) {
+            // 60% magma, 25% skulk, 15% cracked stone
+            place = roll < 0.60 ? Material.MAGMA_BLOCK
+                  : roll < 0.85 ? Material.SCULK
+                  : Material.CRACKED_STONE_BRICKS;
+        } else {
+            // 30% magma, 55% skulk, 15% cracked stone (earlier veins = more skulk)
+            place = roll < 0.30 ? Material.MAGMA_BLOCK
+                  : roll < 0.85 ? Material.SCULK
+                  : Material.CRACKED_STONE_BRICKS;
+        }
+        loc.getBlock().setType(place, false);
+    }
+
+    // ── Ground cracking ───────────────────────────────────────────────────────
+
     private void crackGround(Location centre) {
         if (centre.getWorld() == null) return;
         Random rng = new Random();
 
-        // Inner hole — remove blocks (air) in radius 0–1
+        // Inner hole
         for (int dx = -1; dx <= 1; dx++) {
             for (int dz = -1; dz <= 1; dz++) {
                 if (rng.nextDouble() > 0.6) continue;
-                Location check = centre.clone().add(dx, 0, dz);
-                Location surface = check.getWorld()
-                        .getHighestBlockAt(check).getLocation();
+                Location surface = world.getHighestBlockAt(
+                        centre.clone().add(dx, 0, dz)).getLocation();
                 Material m = surface.getBlock().getType();
                 if (m.isSolid() && m != Material.BEDROCK
-                        && !m.name().contains("LOG")
-                        && !m.name().contains("CHEST")) {
+                        && !m.name().contains("LOG") && !m.name().contains("CHEST")) {
                     surface.getBlock().setType(Material.AIR, false);
                 }
             }
         }
 
-        // Outer magma scatter — radius 2–4
+        // Outer magma ring (radius 2–4)
         int magmaRadius = 2 + rng.nextInt(3);
         for (int dx = -magmaRadius; dx <= magmaRadius; dx++) {
             for (int dz = -magmaRadius; dz <= magmaRadius; dz++) {
                 double dist = Math.sqrt(dx * dx + dz * dz);
-                if (dist < 1.5 || dist > magmaRadius) continue; // ring only
-                if (rng.nextDouble() > 0.35) continue;           // sparse
-
-                Location check   = centre.clone().add(dx, 0, dz);
-                Location surface = check.getWorld()
-                        .getHighestBlockAt(check).getLocation();
+                if (dist < 1.5 || dist > magmaRadius) continue;
+                if (rng.nextDouble() > 0.35) continue;
+                Location surface = world.getHighestBlockAt(
+                        centre.clone().add(dx, 0, dz)).getLocation();
                 Material m = surface.getBlock().getType();
                 if (m.isSolid() && m != Material.BEDROCK
-                        && !m.name().contains("LOG")
-                        && !m.name().contains("CHEST")) {
-                    // Mostly magma, occasionally cracked stone for variety
-                    Material place = rng.nextDouble() < 0.7
-                            ? Material.MAGMA_BLOCK
-                            : Material.CRACKED_STONE_BRICKS;
-                    surface.getBlock().setType(place, false);
+                        && !m.name().contains("LOG") && !m.name().contains("CHEST")) {
+                    surface.getBlock().setType(
+                            rng.nextDouble() < 0.7 ? Material.MAGMA_BLOCK
+                                                   : Material.CRACKED_STONE_BRICKS,
+                            false);
                 }
             }
         }
@@ -352,8 +422,7 @@ public class DungeonInstance {
         bossBar.setProgress(prog);
 
         if (timerPaused) {
-            String graceStr = graceCountdown > 0 ? " — return in §c" + graceCountdown + "s" : " — extracting...";
-            bossBar.setTitle("§e§lTIMER PAUSED" + graceStr);
+            bossBar.setTitle("§e§lTIMER PAUSED — Extracting...");
             bossBar.setColor(BarColor.YELLOW);
         } else {
             bossBar.setTitle(buildBarTitle());
@@ -377,14 +446,11 @@ public class DungeonInstance {
     private void tickExtractionProgress() {
         int holdSeconds = DungeonRift.get().getConfig()
                 .getInt("instance.extraction-hold-seconds", 10);
-
         new HashSet<>(extractionProgress.keySet()).forEach(uuid -> {
             Player player = Bukkit.getPlayer(uuid);
             if (player == null || !player.isOnline()) { extractionProgress.remove(uuid); return; }
-
             int held      = extractionProgress.merge(uuid, 1, Integer::sum);
             int remaining = holdSeconds - held;
-
             if (remaining >= 0) {
                 player.sendTitle("§6Extracting...", "§e" + remaining + "s", 0, 25, 5);
                 player.playSound(player.getLocation(), Sound.BLOCK_NOTE_BLOCK_BASS, 1.0f, 1.0f);
@@ -396,6 +462,7 @@ public class DungeonInstance {
     public void playerEnterExtractionZone(Player player) {
         if (!alivePlayers.contains(player.getUniqueId())) return;
 
+        // 10-minute cooldown
         if (secondsElapsed < EXTRACTION_COOLDOWN_SECONDS) {
             int lastMsg = lastCooldownMessage.getOrDefault(player.getUniqueId(), -10);
             if (secondsElapsed - lastMsg >= 5) {
@@ -408,24 +475,20 @@ public class DungeonInstance {
             return;
         }
 
-        int entries = extractionEntries.getOrDefault(player.getUniqueId(), 0);
-        if (entries >= MAX_EXTRACTION_ENTRIES) {
-            if (!extractionProgress.containsKey(player.getUniqueId())) {
-                player.sendMessage("§c[DungeonRift] Zone entries exhausted — no further pauses.");
-                extractionProgress.put(player.getUniqueId(), 0);
-            }
-            return;
-        }
-
-        extractionEntries.put(player.getUniqueId(), entries + 1);
+        // Start extraction countdown from 0 on each entry
         extractionProgress.put(player.getUniqueId(), 0);
 
-        // If returning during grace — cancel grace (they're back, pause resumes)
-        // but do NOT reset graceCountdown to 5; grace is spent when it started.
-        if (player.getUniqueId().equals(pausedForPlayer) && graceCountdown >= 0) {
-            graceCountdown = -1;
-            player.resetTitle();
-            player.sendMessage("§a[DungeonRift] Back in zone — timer still paused.");
+        // Show exit-limit warning if in safety window
+        int safetyThreshold = DungeonRift.get().getConfig()
+                .getInt("extraction-safety.pause-at-seconds-remaining", 10);
+        if (secondsRemaining <= safetyThreshold) {
+            int exits = safetyZoneExits.getOrDefault(player.getUniqueId(), 0);
+            int remaining = MAX_ZONE_EXITS - exits;
+            if (remaining <= 1 && exits < MAX_ZONE_EXITS) {
+                player.sendMessage("§c[DungeonRift] §eWarning: §7You have §c1 §7zone exit left before the timer pause is disabled!");
+            } else if (exits >= MAX_ZONE_EXITS) {
+                player.sendMessage("§c[DungeonRift] §7Zone exits exhausted — timer will NOT pause if you leave again.");
+            }
         }
     }
 
@@ -434,21 +497,39 @@ public class DungeonInstance {
         extractionProgress.remove(player.getUniqueId());
         player.resetTitle();
         player.sendMessage("§c[DungeonRift] Extraction interrupted!");
+
+        // Count exits inside safety window
+        int safetyThreshold = DungeonRift.get().getConfig()
+                .getInt("extraction-safety.pause-at-seconds-remaining", 10);
+        if (secondsRemaining <= safetyThreshold) {
+            int exits = safetyZoneExits.merge(player.getUniqueId(), 1, Integer::sum);
+            int remaining = MAX_ZONE_EXITS - exits;
+            if (remaining > 0) {
+                player.sendMessage("§c[DungeonRift] §7Zone exit §c" + exits + "/" + MAX_ZONE_EXITS
+                        + "§7 — §e" + remaining + " §7pause(s) remaining.");
+            } else {
+                player.sendMessage("§c[DungeonRift] §4Zone exits exhausted! §7The timer will no longer pause.");
+            }
+        }
+
+        // Release pause immediately when they leave
+        if (player.getUniqueId().equals(pausedForPlayer)) {
+            timerPaused     = false;
+            pausedForPlayer = null;
+        }
     }
 
     // ── Outcomes ──────────────────────────────────────────────────────────────
 
     private void stopPigStep(Player player) {
-        player.stopSound(Sound.MUSIC_DISC_PIGSTEP, SoundCategory.RECORDS);
+        player.stopSound(Sound.MUSIC_DISC_PIGSTEP, SoundCategory.MASTER);
     }
 
     private void extractPlayer(Player player) {
         extractionProgress.remove(player.getUniqueId());
         alivePlayers.remove(player.getUniqueId());
         bossBar.removePlayer(player);
-        if (player.getUniqueId().equals(pausedForPlayer)) {
-            timerPaused = false; pausedForPlayer = null; graceCountdown = -1;
-        }
+        if (player.getUniqueId().equals(pausedForPlayer)) { timerPaused = false; pausedForPlayer = null; }
         stopPigStep(player);
         player.resetTitle();
         player.sendMessage("§8[§6DungeonRift§8] §a§lEXTRACTED! §r§aYour loot has been kept.");
@@ -461,9 +542,7 @@ public class DungeonInstance {
         alivePlayers.remove(player.getUniqueId());
         extractionProgress.remove(player.getUniqueId());
         bossBar.removePlayer(player);
-        if (player.getUniqueId().equals(pausedForPlayer)) {
-            timerPaused = false; pausedForPlayer = null; graceCountdown = -1;
-        }
+        if (player.getUniqueId().equals(pausedForPlayer)) { timerPaused = false; pausedForPlayer = null; }
         stopPigStep(player);
         player.sendMessage("§c[DungeonRift] §4§lYou died in the rift. All loot is lost.");
         DungeonRift.get().getInstanceManager().returnPlayerToHub(player);
@@ -474,12 +553,9 @@ public class DungeonInstance {
         alivePlayers.remove(player.getUniqueId());
         extractionProgress.remove(player.getUniqueId());
         bossBar.removePlayer(player);
-        if (player.getUniqueId().equals(pausedForPlayer)) {
-            timerPaused = false; pausedForPlayer = null; graceCountdown = -1;
-        }
+        if (player.getUniqueId().equals(pausedForPlayer)) { timerPaused = false; pausedForPlayer = null; }
         stopPigStep(player);
-        if (player.isOnline()) player.playSound(player.getLocation(),
-                Sound.ENTITY_WITHER_DEATH, 1.0f, 1.0f);
+        if (player.isOnline()) player.playSound(player.getLocation(), Sound.ENTITY_WITHER_DEATH, 1.0f, 1.0f);
         player.getInventory().clear();
         player.sendMessage("§8[§6DungeonRift§8] §7You abandoned the rift. All loot has been lost.");
         DungeonRift.get().getInstanceManager().returnPlayerToHub(player);
@@ -522,8 +598,11 @@ public class DungeonInstance {
         alivePlayers.clear();
         extractionProgress.clear();
         lastCooldownMessage.clear();
-        extractionEntries.clear();
+        safetyZoneExits.clear();
+        veinSpawnedAt.clear();
         pigStepPlaying = false;
+        timerPaused    = false;
+        pausedForPlayer = null;
 
         state = State.CLOSED;
         DungeonRift.get().getInstanceManager().destroyInstance(this);
