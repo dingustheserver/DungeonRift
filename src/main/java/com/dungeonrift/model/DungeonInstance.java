@@ -176,17 +176,22 @@ public class DungeonInstance {
                 ? Math.min(1.0, 1.0 - ((double) secondsRemaining / collapseStartSeconds))
                 : 1.0;
 
-        // ── Pig Step — plays in the player's head, follows them ────────────
+        // ── Pig Step — executed at the player's position so it follows them ──
+        // Uses the same approach as:
+        //   /execute at <player> run playsound minecraft:music_disc.pigstep record @a ~ ~ ~ 100 1
+        // Playing at ~ ~ ~ (player's own coords) with volume 100 means the sound
+        // originates right on top of them and never attenuates as they move.
         if (!pigStepPlaying && soundsOn) {
             pigStepPlaying = true;
             alivePlayers.forEach(uuid -> {
                 Player p = Bukkit.getPlayer(uuid);
                 if (p == null) return;
-                // MASTER category plays client-side at the player's ear position
-                // regardless of where they move — like a music disc to the client.
-                p.stopSound(Sound.MUSIC_DISC_PIGSTEP, SoundCategory.MASTER);
+                // Stop any previous instance first
+                p.stopSound(Sound.MUSIC_DISC_PIGSTEP, SoundCategory.RECORDS);
+                // Play at the player's exact location with very high volume (100)
+                // so it sounds identical regardless of position in the world
                 p.playSound(p.getLocation(), Sound.MUSIC_DISC_PIGSTEP,
-                        SoundCategory.MASTER, 2.0f, 1.0f);
+                        SoundCategory.RECORDS, 100.0f, 1.0f);
             });
         }
 
@@ -268,14 +273,16 @@ public class DungeonInstance {
 
     // ── Vein generation ───────────────────────────────────────────────────────
 
+    // ── Spreading infection veins ──────────────────────────────────────────────
+
     private void spawnVeinAtThreshold(int threshold, double intensity) {
         if (secondsRemaining > threshold) return;
         if (veinSpawnedAt.contains(threshold)) return;
         veinSpawnedAt.add(threshold);
 
-        // Spawn 2–4 veins spread around alive players
-        Random rng       = new Random();
-        int    veinCount = 2 + (int) (intensity * 2);
+        boolean moreSkulk = threshold >= 90; // early = skulk-heavy, late = magma-heavy
+        Random rng        = new Random();
+        int    veinCount  = 2 + (int) (intensity * 2); // 2–4 veins
 
         alivePlayers.forEach(uuid -> {
             Player p = Bukkit.getPlayer(uuid);
@@ -284,134 +291,177 @@ public class DungeonInstance {
                 double ox = (rng.nextDouble() - 0.5) * 80;
                 double oz = (rng.nextDouble() - 0.5) * 80;
                 Location origin = p.getLocation().add(ox, 0, oz);
-                // Async world gen to avoid server tick spike
+                long startDelay  = v * 5L; // stagger vein starts
+
+                // Each vein: place seed, then spread outward over several ticks
                 DungeonRift.get().getServer().getScheduler().runTaskLater(
                         DungeonRift.get(),
-                        () -> generateVein(origin, threshold, rng),
-                        (long) (v * 4)); // stagger 4 ticks apart
+                        () -> startInfectionVein(origin, moreSkulk, rng),
+                        startDelay);
             }
         });
     }
 
     /**
-     * Generates a branching vein of magma and skulk blocks along the surface.
-     * The vein walks randomly in a direction, placing blocks at surface level,
-     * making the terrain look like it's splitting apart.
+     * Starts an infection vein at a point and spreads it outward over 6 waves,
+     * one wave per second. Each wave adds a new ring of infection with a chance
+     * of the infection also deleting blocks (leaving holes/craters).
      *
-     * @param origin     Starting location
-     * @param threshold  The time threshold (controls material mix)
-     * @param rng        Shared Random instance
+     * Early veins (moreSkulk=true): skulk-heavy — looks like dark corruption spreading
+     * Late veins  (moreSkulk=false): magma-heavy — looks like molten rock spreading
      */
-    private void generateVein(Location origin, int threshold, Random rng) {
+    private void startInfectionVein(Location origin, boolean moreSkulk, Random rng) {
         if (origin.getWorld() == null) return;
 
-        // Material weighting: earlier (150s) = mostly skulk; later (30s) = mostly magma
-        boolean moreMagma = threshold <= 60;
+        // Plant the seed — place a small cluster at the origin
+        Location surface = world.getHighestBlockAt(origin).getLocation();
+        if (canInfect(surface.getBlock().getType())) {
+            surface.getBlock().setType(moreSkulk ? Material.SCULK : Material.MAGMA_BLOCK, false);
+        }
 
-        // Walk the vein: 8–20 steps in a semi-random direction
-        int steps = 8 + rng.nextInt(13);
-        double dirX = (rng.nextDouble() - 0.5) * 2;
-        double dirZ = (rng.nextDouble() - 0.5) * 2;
-
-        Location current = origin.clone();
-        for (int step = 0; step < steps; step++) {
-            // Drift the direction slightly each step for organic feel
-            dirX += (rng.nextDouble() - 0.5) * 0.4;
-            dirZ += (rng.nextDouble() - 0.5) * 0.4;
-
-            current = current.add(dirX, 0, dirZ);
-
-            // Find surface
-            Location surface = world.getHighestBlockAt(current).getLocation();
-
-            // Place primary block
-            placeVeinBlock(surface, moreMagma, rng);
-
-            // Widen vein — place 1–2 blocks on each side perpendicular to travel
-            int width = 1 + (step % 3 == 0 ? 1 : 0); // occasionally wider
-            for (int w = 1; w <= width; w++) {
-                placeVeinBlock(surface.clone().add(dirZ, 0, -dirX * w), moreMagma, rng);
-                placeVeinBlock(surface.clone().add(-dirZ, 0, dirX * w), moreMagma, rng);
-            }
-
-            // Occasional branch — 20% chance past step 4
-            if (step > 4 && rng.nextDouble() < 0.2) {
-                double bx = (rng.nextDouble() - 0.5) * 2;
-                double bz = (rng.nextDouble() - 0.5) * 2;
-                Location branch = surface.clone();
-                int branchLen   = 3 + rng.nextInt(5);
-                for (int b = 0; b < branchLen; b++) {
-                    branch = branch.add(bx, 0, bz);
-                    placeVeinBlock(world.getHighestBlockAt(branch).getLocation(), moreMagma, rng);
-                }
-            }
+        // Spread outward: 6 waves, each 1 block further, fired 1s apart
+        int waves = 6 + rng.nextInt(4); // 6–9 waves
+        for (int wave = 1; wave <= waves; wave++) {
+            final int   radius     = wave;
+            final long  delay      = wave * 20L; // one wave per second
+            final boolean skulkWave = moreSkulk;
+            DungeonRift.get().getServer().getScheduler().runTaskLater(
+                    DungeonRift.get(),
+                    () -> infectRing(origin, radius, skulkWave, rng),
+                    delay);
         }
     }
 
-    private void placeVeinBlock(Location loc, boolean moreMagma, Random rng) {
-        if (loc.getWorld() == null) return;
-        Material m = loc.getBlock().getType();
-        if (!m.isSolid() || m == Material.BEDROCK
-                || m.name().contains("LOG")   || m.name().contains("LEAVES")
-                || m.name().contains("CHEST") || m.name().contains("SIGN")
-                || m.name().contains("SKULL") || m == Material.MAGMA_BLOCK
-                || m == Material.SCULK) return;
+    /**
+     * Infects a single ring at the given radius around the origin.
+     * Blocks in the ring have a chance to become magma, skulk, or air (hole).
+     */
+    private void infectRing(Location origin, int radius, boolean moreSkulk, Random rng) {
+        if (origin.getWorld() == null) return;
 
-        double roll = rng.nextDouble();
-        Material place;
-        if (moreMagma) {
-            // 60% magma, 25% skulk, 15% cracked stone
-            place = roll < 0.60 ? Material.MAGMA_BLOCK
-                  : roll < 0.85 ? Material.SCULK
-                  : Material.CRACKED_STONE_BRICKS;
-        } else {
-            // 30% magma, 55% skulk, 15% cracked stone (earlier veins = more skulk)
-            place = roll < 0.30 ? Material.MAGMA_BLOCK
-                  : roll < 0.85 ? Material.SCULK
-                  : Material.CRACKED_STONE_BRICKS;
+        // Angular sweep around the ring — gives organic uneven spread
+        int steps = (int) (Math.PI * 2 * radius * 4); // ~4 samples per block
+        for (int i = 0; i < steps; i++) {
+            double angle = (2 * Math.PI * i) / steps;
+            double ox    = Math.cos(angle) * radius;
+            double oz    = Math.sin(angle) * radius;
+
+            // Fuzzy radius — jitter ±1 for organic edges
+            double jitter = (rng.nextDouble() - 0.5) * 2;
+            double jx = Math.cos(angle) * jitter;
+            double jz = Math.sin(angle) * jitter;
+
+            Location check = world.getHighestBlockAt(
+                    origin.clone().add(ox + jx, 0, oz + jz)).getLocation();
+            Material m = check.getBlock().getType();
+            if (!canInfect(m)) continue;
+
+            double roll = rng.nextDouble();
+
+            if (roll < 0.15) {
+                // 15% — remove block (infection eats through)
+                check.getBlock().setType(Material.AIR, false);
+            } else if (roll < 0.55) {
+                // 40% — place infection block
+                check.getBlock().setType(
+                        moreSkulk ? (rng.nextDouble() < 0.7 ? Material.SCULK : Material.MAGMA_BLOCK)
+                                  : (rng.nextDouble() < 0.65 ? Material.MAGMA_BLOCK : Material.SCULK),
+                        false);
+            }
+            // Remaining 45% — untouched, gives patchy organic look
         }
-        loc.getBlock().setType(place, false);
     }
 
-    // ── Ground cracking ───────────────────────────────────────────────────────
+    // ── Ground cracking (lightning strike) ───────────────────────────────────
 
     private void crackGround(Location centre) {
         if (centre.getWorld() == null) return;
         Random rng = new Random();
 
-        // Inner hole
+        // Inner hole — remove 1–3 surface blocks around impact
         for (int dx = -1; dx <= 1; dx++) {
             for (int dz = -1; dz <= 1; dz++) {
-                if (rng.nextDouble() > 0.6) continue;
+                if (rng.nextDouble() > 0.55) continue;
                 Location surface = world.getHighestBlockAt(
                         centre.clone().add(dx, 0, dz)).getLocation();
                 Material m = surface.getBlock().getType();
-                if (m.isSolid() && m != Material.BEDROCK
-                        && !m.name().contains("LOG") && !m.name().contains("CHEST")) {
-                    surface.getBlock().setType(Material.AIR, false);
+                if (canInfect(m)) surface.getBlock().setType(Material.AIR, false);
+            }
+        }
+
+        // Immediate ring: magma + skulk around the hole
+        for (int dx = -2; dx <= 2; dx++) {
+            for (int dz = -2; dz <= 2; dz++) {
+                double dist = Math.sqrt(dx * dx + dz * dz);
+                if (dist < 1.5 || dist > 2.5) continue;
+                if (rng.nextDouble() > 0.5) continue;
+                Location surface = world.getHighestBlockAt(
+                        centre.clone().add(dx, 0, dz)).getLocation();
+                if (canInfect(surface.getBlock().getType())) {
+                    surface.getBlock().setType(
+                            rng.nextDouble() < 0.6 ? Material.MAGMA_BLOCK : Material.SCULK, false);
                 }
             }
         }
 
-        // Outer magma ring (radius 2–4)
-        int magmaRadius = 2 + rng.nextInt(3);
-        for (int dx = -magmaRadius; dx <= magmaRadius; dx++) {
-            for (int dz = -magmaRadius; dz <= magmaRadius; dz++) {
+        // Schedule spreading infection outward from the impact — 3 waves, 1s apart
+        for (int wave = 1; wave <= 3; wave++) {
+            final int waveRadius = wave + 2; // wave 1=r3, wave 2=r4, wave 3=r5
+            final long delay     = wave * 20L;
+            DungeonRift.get().getServer().getScheduler().runTaskLater(DungeonRift.get(), () -> {
+                spreadInfection(centre, waveRadius, rng, false);
+            }, delay);
+        }
+    }
+
+    /**
+     * Spreads infection (magma + skulk) outward from a centre point.
+     * Each block has a chance of being infected, and each infected block
+     * also has a chance of removing a block (creating holes).
+     *
+     * @param centre  Origin of spread
+     * @param radius  How far out to spread this wave
+     * @param rng     Random instance
+     * @param moreSkulk  Whether to weight toward skulk (true) or magma (false)
+     */
+    private void spreadInfection(Location centre, int radius, Random rng, boolean moreSkulk) {
+        if (centre.getWorld() == null) return;
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dz = -radius; dz <= radius; dz++) {
                 double dist = Math.sqrt(dx * dx + dz * dz);
-                if (dist < 1.5 || dist > magmaRadius) continue;
-                if (rng.nextDouble() > 0.35) continue;
+                // Only process the outer ring of this radius (onion-skin spreading)
+                if (dist < radius - 1.0 || dist > radius + 0.5) continue;
+                if (rng.nextDouble() > 0.4) continue; // 40% infection chance per block
+
                 Location surface = world.getHighestBlockAt(
                         centre.clone().add(dx, 0, dz)).getLocation();
                 Material m = surface.getBlock().getType();
-                if (m.isSolid() && m != Material.BEDROCK
-                        && !m.name().contains("LOG") && !m.name().contains("CHEST")) {
-                    surface.getBlock().setType(
-                            rng.nextDouble() < 0.7 ? Material.MAGMA_BLOCK
-                                                   : Material.CRACKED_STONE_BRICKS,
-                            false);
+                if (!canInfect(m)) continue;
+
+                // 15% chance of removing the block (hole/crater spread)
+                if (rng.nextDouble() < 0.15) {
+                    surface.getBlock().setType(Material.AIR, false);
+                    continue;
                 }
+
+                // Place infection block
+                Material place;
+                if (moreSkulk) {
+                    place = rng.nextDouble() < 0.65 ? Material.SCULK : Material.MAGMA_BLOCK;
+                } else {
+                    place = rng.nextDouble() < 0.55 ? Material.MAGMA_BLOCK : Material.SCULK;
+                }
+                surface.getBlock().setType(place, false);
             }
         }
+    }
+
+    private boolean canInfect(Material m) {
+        if (!m.isSolid() || m == Material.BEDROCK) return false;
+        if (m == Material.MAGMA_BLOCK || m == Material.SCULK) return false;
+        String n = m.name();
+        return !n.contains("LOG") && !n.contains("LEAVES") && !n.contains("CHEST")
+            && !n.contains("SIGN") && !n.contains("SKULL") && !n.contains("SHULKER");
     }
 
     // ── Boss bar ──────────────────────────────────────────────────────────────
@@ -522,7 +572,7 @@ public class DungeonInstance {
     // ── Outcomes ──────────────────────────────────────────────────────────────
 
     private void stopPigStep(Player player) {
-        player.stopSound(Sound.MUSIC_DISC_PIGSTEP, SoundCategory.MASTER);
+        player.stopSound(Sound.MUSIC_DISC_PIGSTEP, SoundCategory.RECORDS);
     }
 
     private void extractPlayer(Player player) {
