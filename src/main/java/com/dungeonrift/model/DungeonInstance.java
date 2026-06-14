@@ -382,47 +382,65 @@ public class DungeonInstance {
     // ── Tentacle spread from lightning strike ────────────────────────────────
 
     /**
-     * Grows 3–5 tentacles outward from a lightning strike point.
-     * Each tentacle is an independent arm that drifts in a direction,
-     * placing magma and skulk blocks one step per tick.
-     * Gives a dynamic "spreading from impact" look.
+     * Spawns a crater, fire, and 4–6 thick tentacles from a lightning strike.
+     * Tentacles are 3 blocks wide with a solid core plus two flanking lanes.
      */
     private void spawnTentacles(Location origin, Random rng) {
         if (origin.getWorld() == null) return;
 
-        // Crater at impact: remove 1–2 blocks, surround with magma
-        Location impactSurface = world.getHighestBlockAt(origin).getLocation();
-        if (canInfect(impactSurface.getBlock().getType()))
-            impactSurface.getBlock().setType(Material.AIR, false);
+        // ── Crater at impact ──────────────────────────────────────────────
+        // Remove a 3x3 area around impact and fill with magma + fire above
         for (int dx = -1; dx <= 1; dx++) {
             for (int dz = -1; dz <= 1; dz++) {
-                if (dx == 0 && dz == 0) continue;
-                if (rng.nextDouble() > 0.6) continue;
                 Location s = world.getHighestBlockAt(origin.clone().add(dx, 0, dz)).getLocation();
-                if (canInfect(s.getBlock().getType()))
+                Material m = s.getBlock().getType();
+                if (!canInfect(m)) continue;
+
+                if (dx == 0 && dz == 0) {
+                    // Dead centre — always air
+                    s.getBlock().setType(Material.AIR, false);
+                } else {
                     s.getBlock().setType(Material.MAGMA_BLOCK, false);
+                    // Fire on top of magma at the crater rim
+                    Location above = s.clone().add(0, 1, 0);
+                    if (above.getBlock().getType() == Material.AIR) {
+                        above.getBlock().setType(Material.FIRE, false);
+                    }
+                }
             }
         }
 
-        // Spawn 3–5 tentacles from the impact point
-        int tentacleCount = 3 + rng.nextInt(3);
-        for (int t = 0; t < tentacleCount; t++) {
-            // Each tentacle starts at a random angle
-            double angle    = (2 * Math.PI * t) / tentacleCount + (rng.nextDouble() - 0.5) * 0.8;
-            double speedX   = Math.cos(angle);
-            double speedZ   = Math.sin(angle);
-            int    length   = 6 + rng.nextInt(8); // 6–13 blocks long
-            // Alternate magma and skulk along each tentacle
-            boolean startMagma = rng.nextBoolean();
+        // ── Fire burst — extra fire blocks scattered around impact ────────
+        for (int dx = -3; dx <= 3; dx++) {
+            for (int dz = -3; dz <= 3; dz++) {
+                if (rng.nextDouble() > 0.45) continue;
+                Location s = world.getHighestBlockAt(origin.clone().add(dx, 0, dz)).getLocation();
+                Location above = s.clone().add(0, 1, 0);
+                if (s.getBlock().getType().isSolid()
+                        && above.getBlock().getType() == Material.AIR) {
+                    above.getBlock().setType(Material.FIRE, false);
+                }
+            }
+        }
 
-            growTentacleStep(origin.clone(), speedX, speedZ, 0, length, startMagma, rng);
+        // ── Thick tentacles ───────────────────────────────────────────────
+        // 4–6 arms, each 3 blocks wide (core + 2 flanks), 8–15 blocks long
+        int tentacleCount = 4 + rng.nextInt(3);
+        for (int t = 0; t < tentacleCount; t++) {
+            double angle   = (2 * Math.PI * t) / tentacleCount + (rng.nextDouble() - 0.5) * 0.7;
+            double speedX  = Math.cos(angle);
+            double speedZ  = Math.sin(angle);
+            int    length  = 8 + rng.nextInt(8);  // 8–15 blocks
+            boolean magma  = rng.nextBoolean();
+            growTentacleStep(origin.clone(), speedX, speedZ, 0, length, magma, rng);
         }
     }
 
     /**
-     * Recursively grows one tentacle step-by-step using the scheduler.
-     * Each step fires 2 ticks after the previous, giving visible movement.
-     * The direction drifts slightly each step for organic curvature.
+     * Grows one thick tentacle step-by-step via the scheduler.
+     * Each step places a 3-wide cross-section: core block + two side flanks.
+     * Fire spawns above magma blocks along the arm.
+     * Additional fire is scattered at each step for a burning trail effect.
      */
     private void growTentacleStep(Location current, double dx, double dz,
                                    int step, int maxSteps, boolean placeMagma, Random rng) {
@@ -432,52 +450,75 @@ public class DungeonInstance {
         DungeonRift.get().getServer().getScheduler().runTaskLater(DungeonRift.get(), () -> {
             if (world == null) return;
 
-            // Drift direction slightly — organic curvature
-            double newDx = dx + (rng.nextDouble() - 0.5) * 0.5;
-            double newDz = dz + (rng.nextDouble() - 0.5) * 0.5;
-
-            // Normalise so speed stays consistent
-            double len = Math.sqrt(newDx * newDx + newDz * newDz);
+            // Drift direction for organic curvature
+            double newDx = dx + (rng.nextDouble() - 0.5) * 0.45;
+            double newDz = dz + (rng.nextDouble() - 0.5) * 0.45;
+            double len   = Math.sqrt(newDx * newDx + newDz * newDz);
             if (len > 0) { newDx /= len; newDz /= len; }
 
-            Location next    = current.clone().add(newDx, 0, newDz);
-            Location surface = world.getHighestBlockAt(next).getLocation();
-            Material m       = surface.getBlock().getType();
+            Location next = current.clone().add(newDx, 0, newDz);
 
-            if (canInfect(m)) {
-                // Alternate magma/skulk along arm, with rare air gap (hole)
-                double roll = rng.nextDouble();
-                if (roll < 0.10) {
-                    surface.getBlock().setType(Material.AIR, false);
-                } else {
-                    // Core alternation: magma → skulk → magma...
-                    // Near tip: more skulk (darker, fading effect)
-                    boolean nearTip = step > maxSteps * 0.7;
-                    Material place  = nearTip
-                            ? (rng.nextDouble() < 0.7 ? Material.SCULK : Material.MAGMA_BLOCK)
-                            : (placeMagma ? Material.MAGMA_BLOCK : Material.SCULK);
-                    surface.getBlock().setType(place, false);
+            // Near tip = bias toward skulk; near root = bias toward magma
+            boolean nearTip = step > maxSteps * 0.65;
+            Material coreMat = nearTip
+                    ? (rng.nextDouble() < 0.75 ? Material.SCULK   : Material.MAGMA_BLOCK)
+                    : (placeMagma
+                            ? (rng.nextDouble() < 0.6 ? Material.MAGMA_BLOCK : Material.SCULK)
+                            : (rng.nextDouble() < 0.6 ? Material.SCULK       : Material.MAGMA_BLOCK));
 
-                    // Side whiskers — occasionally branch 1 block to the side
-                    if (rng.nextDouble() < 0.25) {
-                        double perpX = -newDz;
-                        double perpZ =  newDx;
-                        int    side  = rng.nextBoolean() ? 1 : -1;
-                        Location whisker = world.getHighestBlockAt(
-                                next.clone().add(perpX * side, 0, perpZ * side)).getLocation();
-                        if (canInfect(whisker.getBlock().getType())) {
-                            whisker.getBlock().setType(
-                                    rng.nextDouble() < 0.5 ? Material.SCULK : Material.MAGMA_BLOCK,
-                                    false);
-                        }
-                    }
+            // ── Core block ─────────────────────────────────────────────────
+            placeInfectionBlock(next, coreMat, rng);
+
+            // ── Flanking blocks — makes the tentacle 3 wide ────────────────
+            // Perpendicular direction to the travel direction
+            double perpX = -newDz;
+            double perpZ =  newDx;
+
+            // Both sides
+            for (int side = -1; side <= 1; side += 2) {
+                Location flank = next.clone().add(perpX * side, 0, perpZ * side);
+                // Flanks are slightly biased to skulk for a layered look
+                Material flankMat = rng.nextDouble() < 0.55 ? Material.SCULK : Material.MAGMA_BLOCK;
+                placeInfectionBlock(flank, flankMat, rng);
+
+                // Occasional extra outer flank — makes it 5 wide at random spots
+                if (rng.nextDouble() < 0.3) {
+                    Location outerFlank = next.clone().add(perpX * side * 2, 0, perpZ * side * 2);
+                    placeInfectionBlock(outerFlank, Material.SCULK, rng);
                 }
             }
 
-            // Continue growing — 2 ticks between each step
+            // Continue arm
             growTentacleStep(next, newDx, newDz, step + 1, maxSteps, !placeMagma, rng);
 
-        }, 2L); // 2 ticks = 0.1s per step — visibly moves outward
+        }, 2L);
+    }
+
+    /**
+     * Places a single infection block at the surface of a location.
+     * If the block placed is magma, fire is spawned above it.
+     * 8% chance to leave an air hole instead.
+     */
+    private void placeInfectionBlock(Location loc, Material mat, Random rng) {
+        Location surface = world.getHighestBlockAt(loc).getLocation();
+        Material existing = surface.getBlock().getType();
+        if (!canInfect(existing)) return;
+
+        if (rng.nextDouble() < 0.08) {
+            // Rare air gap — infection eats a hole
+            surface.getBlock().setType(Material.AIR, false);
+            return;
+        }
+
+        surface.getBlock().setType(mat, false);
+
+        // Fire above every magma block — burning tentacle trail
+        if (mat == Material.MAGMA_BLOCK) {
+            Location above = surface.clone().add(0, 1, 0);
+            if (above.getBlock().getType() == Material.AIR) {
+                above.getBlock().setType(Material.FIRE, false);
+            }
+        }
     }
 
     private boolean canInfect(Material m) {
