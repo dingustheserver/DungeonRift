@@ -195,11 +195,13 @@ public class DungeonInstance {
             });
         }
 
-        // ── Storm ─────────────────────────────────────────────────────────
+        // ── Thunder without rain — dramatic sky without wet ground ──────────
         if (weatherOn) {
-            world.setStorm(true);
+            // setStorm(false) = clear weather (no rain)
+            // setThundering(true) = thunder still rumbles, sky darkens
+            world.setStorm(false);
             world.setThundering(true);
-            world.setWeatherDuration(600);
+            world.setThunderDuration(600);
         }
 
         // ── Crumbling sounds ──────────────────────────────────────────────
@@ -229,10 +231,10 @@ public class DungeonInstance {
             });
         }
 
-        // ── Lightning + ground cracking ───────────────────────────────────
+        // ── Lightning hits the ground, then spawns tentacles ─────────────
         int lightningInterval = Math.max(2, (int) (8 - intensity * 6));
         if (lightningOn && collapseTickCounter % lightningInterval == 0) {
-            Random rng    = new Random();
+            Random rng     = new Random();
             int    strikes = 1 + (int) (intensity * 2);
             for (int i = 0; i < strikes; i++) {
                 alivePlayers.forEach(uuid -> {
@@ -240,10 +242,15 @@ public class DungeonInstance {
                     if (p == null) return;
                     double ox = (rng.nextDouble() - 0.5) * 50;
                     double oz = (rng.nextDouble() - 0.5) * 50;
-                    Location strikeLoc = p.getLocation().add(ox, 0, oz);
-                    world.strikeLightning(strikeLoc);
+                    // ── Find ground level so lightning actually hits the terrain ──
+                    Location approx   = p.getLocation().add(ox, 0, oz);
+                    Location groundLoc = world.getHighestBlockAt(approx)
+                            .getLocation().add(0, 1, 0); // 1 above surface = strike point
+                    world.strikeLightning(groundLoc);
+                    // Tentacles grow from the surface block, not strike point
+                    Location surface = groundLoc.clone().subtract(0, 1, 0);
                     plugin.getServer().getScheduler().runTaskLater(plugin,
-                            () -> crackGround(strikeLoc), 2L);
+                            () -> spawnTentacles(surface, rng), 2L);
                 });
             }
         }
@@ -372,88 +379,105 @@ public class DungeonInstance {
         }
     }
 
-    // ── Ground cracking (lightning strike) ───────────────────────────────────
+    // ── Tentacle spread from lightning strike ────────────────────────────────
 
-    private void crackGround(Location centre) {
-        if (centre.getWorld() == null) return;
-        Random rng = new Random();
+    /**
+     * Grows 3–5 tentacles outward from a lightning strike point.
+     * Each tentacle is an independent arm that drifts in a direction,
+     * placing magma and skulk blocks one step per tick.
+     * Gives a dynamic "spreading from impact" look.
+     */
+    private void spawnTentacles(Location origin, Random rng) {
+        if (origin.getWorld() == null) return;
 
-        // Inner hole — remove 1–3 surface blocks around impact
+        // Crater at impact: remove 1–2 blocks, surround with magma
+        Location impactSurface = world.getHighestBlockAt(origin).getLocation();
+        if (canInfect(impactSurface.getBlock().getType()))
+            impactSurface.getBlock().setType(Material.AIR, false);
         for (int dx = -1; dx <= 1; dx++) {
             for (int dz = -1; dz <= 1; dz++) {
-                if (rng.nextDouble() > 0.55) continue;
-                Location surface = world.getHighestBlockAt(
-                        centre.clone().add(dx, 0, dz)).getLocation();
-                Material m = surface.getBlock().getType();
-                if (canInfect(m)) surface.getBlock().setType(Material.AIR, false);
+                if (dx == 0 && dz == 0) continue;
+                if (rng.nextDouble() > 0.6) continue;
+                Location s = world.getHighestBlockAt(origin.clone().add(dx, 0, dz)).getLocation();
+                if (canInfect(s.getBlock().getType()))
+                    s.getBlock().setType(Material.MAGMA_BLOCK, false);
             }
         }
 
-        // Immediate ring: magma + skulk around the hole
-        for (int dx = -2; dx <= 2; dx++) {
-            for (int dz = -2; dz <= 2; dz++) {
-                double dist = Math.sqrt(dx * dx + dz * dz);
-                if (dist < 1.5 || dist > 2.5) continue;
-                if (rng.nextDouble() > 0.5) continue;
-                Location surface = world.getHighestBlockAt(
-                        centre.clone().add(dx, 0, dz)).getLocation();
-                if (canInfect(surface.getBlock().getType())) {
-                    surface.getBlock().setType(
-                            rng.nextDouble() < 0.6 ? Material.MAGMA_BLOCK : Material.SCULK, false);
-                }
-            }
-        }
+        // Spawn 3–5 tentacles from the impact point
+        int tentacleCount = 3 + rng.nextInt(3);
+        for (int t = 0; t < tentacleCount; t++) {
+            // Each tentacle starts at a random angle
+            double angle    = (2 * Math.PI * t) / tentacleCount + (rng.nextDouble() - 0.5) * 0.8;
+            double speedX   = Math.cos(angle);
+            double speedZ   = Math.sin(angle);
+            int    length   = 6 + rng.nextInt(8); // 6–13 blocks long
+            // Alternate magma and skulk along each tentacle
+            boolean startMagma = rng.nextBoolean();
 
-        // Schedule spreading infection outward from the impact — 3 waves, 1s apart
-        for (int wave = 1; wave <= 3; wave++) {
-            final int waveRadius = wave + 2; // wave 1=r3, wave 2=r4, wave 3=r5
-            final long delay     = wave * 20L;
-            DungeonRift.get().getServer().getScheduler().runTaskLater(DungeonRift.get(), () -> {
-                spreadInfection(centre, waveRadius, rng, false);
-            }, delay);
+            growTentacleStep(origin.clone(), speedX, speedZ, 0, length, startMagma, rng);
         }
     }
 
     /**
-     * Spreads infection (magma + skulk) outward from a centre point.
-     * Each block has a chance of being infected, and each infected block
-     * also has a chance of removing a block (creating holes).
-     *
-     * @param centre  Origin of spread
-     * @param radius  How far out to spread this wave
-     * @param rng     Random instance
-     * @param moreSkulk  Whether to weight toward skulk (true) or magma (false)
+     * Recursively grows one tentacle step-by-step using the scheduler.
+     * Each step fires 2 ticks after the previous, giving visible movement.
+     * The direction drifts slightly each step for organic curvature.
      */
-    private void spreadInfection(Location centre, int radius, Random rng, boolean moreSkulk) {
-        if (centre.getWorld() == null) return;
-        for (int dx = -radius; dx <= radius; dx++) {
-            for (int dz = -radius; dz <= radius; dz++) {
-                double dist = Math.sqrt(dx * dx + dz * dz);
-                // Only process the outer ring of this radius (onion-skin spreading)
-                if (dist < radius - 1.0 || dist > radius + 0.5) continue;
-                if (rng.nextDouble() > 0.4) continue; // 40% infection chance per block
+    private void growTentacleStep(Location current, double dx, double dz,
+                                   int step, int maxSteps, boolean placeMagma, Random rng) {
+        if (step >= maxSteps || current.getWorld() == null) return;
+        if (DungeonRift.get() == null) return;
 
-                Location surface = world.getHighestBlockAt(
-                        centre.clone().add(dx, 0, dz)).getLocation();
-                Material m = surface.getBlock().getType();
-                if (!canInfect(m)) continue;
+        DungeonRift.get().getServer().getScheduler().runTaskLater(DungeonRift.get(), () -> {
+            if (world == null) return;
 
-                // 15% chance of removing the block (hole/crater spread)
-                if (rng.nextDouble() < 0.15) {
+            // Drift direction slightly — organic curvature
+            double newDx = dx + (rng.nextDouble() - 0.5) * 0.5;
+            double newDz = dz + (rng.nextDouble() - 0.5) * 0.5;
+
+            // Normalise so speed stays consistent
+            double len = Math.sqrt(newDx * newDx + newDz * newDz);
+            if (len > 0) { newDx /= len; newDz /= len; }
+
+            Location next    = current.clone().add(newDx, 0, newDz);
+            Location surface = world.getHighestBlockAt(next).getLocation();
+            Material m       = surface.getBlock().getType();
+
+            if (canInfect(m)) {
+                // Alternate magma/skulk along arm, with rare air gap (hole)
+                double roll = rng.nextDouble();
+                if (roll < 0.10) {
                     surface.getBlock().setType(Material.AIR, false);
-                    continue;
-                }
-
-                // Place infection block
-                Material place;
-                if (moreSkulk) {
-                    place = rng.nextDouble() < 0.65 ? Material.SCULK : Material.MAGMA_BLOCK;
                 } else {
-                    place = rng.nextDouble() < 0.55 ? Material.MAGMA_BLOCK : Material.SCULK;
+                    // Core alternation: magma → skulk → magma...
+                    // Near tip: more skulk (darker, fading effect)
+                    boolean nearTip = step > maxSteps * 0.7;
+                    Material place  = nearTip
+                            ? (rng.nextDouble() < 0.7 ? Material.SCULK : Material.MAGMA_BLOCK)
+                            : (placeMagma ? Material.MAGMA_BLOCK : Material.SCULK);
+                    surface.getBlock().setType(place, false);
+
+                    // Side whiskers — occasionally branch 1 block to the side
+                    if (rng.nextDouble() < 0.25) {
+                        double perpX = -newDz;
+                        double perpZ =  newDx;
+                        int    side  = rng.nextBoolean() ? 1 : -1;
+                        Location whisker = world.getHighestBlockAt(
+                                next.clone().add(perpX * side, 0, perpZ * side)).getLocation();
+                        if (canInfect(whisker.getBlock().getType())) {
+                            whisker.getBlock().setType(
+                                    rng.nextDouble() < 0.5 ? Material.SCULK : Material.MAGMA_BLOCK,
+                                    false);
+                        }
+                    }
                 }
-                surface.getBlock().setType(place, false);
             }
-        }
+
+            // Continue growing — 2 ticks between each step
+            growTentacleStep(next, newDx, newDz, step + 1, maxSteps, !placeMagma, rng);
+
+        }, 2L); // 2 ticks = 0.1s per step — visibly moves outward
     }
 
     private boolean canInfect(Material m) {
@@ -635,6 +659,8 @@ public class DungeonInstance {
         bossBar.removeAll();
         world.setStorm(false);
         world.setThundering(false);
+        world.setWeatherDuration(0);
+        world.setThunderDuration(0);
 
         new HashSet<>(alivePlayers).forEach(uuid -> {
             Player p = Bukkit.getPlayer(uuid);
