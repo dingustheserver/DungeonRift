@@ -3,6 +3,7 @@ package com.dungeonrift.manager;
 import com.dungeonrift.DungeonRift;
 import com.dungeonrift.model.DungeonInstance;
 import org.bukkit.*;
+import org.bukkit.inventory.ItemStack;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.potion.PotionEffect;
@@ -46,9 +47,21 @@ public class InstanceManager {
 
         log.info("Instance world loaded: " + instanceId);
 
-        // Hub loadout: save each player's inventory before clearing
+        // Snapshot inventories NOW before teleport — Paper 1.21 cross-world
+        // teleport clears inventory as part of world transfer, so we capture
+        // each player's items here and restore them after the teleport lands.
         boolean clearOnEnter = plugin.getConfig().getBoolean("loot.clear-on-enter", false);
-        if (clearOnEnter) players.forEach(p -> p.getInventory().clear());
+        Map<UUID, ItemStack[]> inventorySnapshots = new HashMap<>();
+        Map<UUID, ItemStack[]> armorSnapshots     = new HashMap<>();
+        Map<UUID, ItemStack>   offhandSnapshots   = new HashMap<>();
+
+        if (!clearOnEnter) {
+            players.forEach(p -> {
+                inventorySnapshots.put(p.getUniqueId(), p.getInventory().getContents().clone());
+                armorSnapshots.put(p.getUniqueId(),     p.getInventory().getArmorContents().clone());
+                offhandSnapshots.put(p.getUniqueId(),   p.getInventory().getItemInOffHand().clone());
+            });
+        }
 
         String templateName = plugin.getTemplateManager().getActiveTemplateName();
         DungeonInstance di  = new DungeonInstance(instanceId, world, templateName, players);
@@ -58,7 +71,7 @@ public class InstanceManager {
 
         Location spawnLoc = buildSpawnLocation(world);
 
-        // Staggered teleport — 2 ticks between each player
+        // Staggered teleport — 2 ticks between each player, then restore inventory
         List<Player> snapshot = new ArrayList<>(players);
         for (int i = 0; i < snapshot.size(); i++) {
             final Player p     = snapshot.get(i);
@@ -66,8 +79,22 @@ public class InstanceManager {
             plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
                 if (!p.isOnline()) return;
                 p.teleport(spawnLoc);
-                applyEntryEffects(p);
-                log.info("Teleported " + p.getName() + " into " + instanceId);
+
+                // Restore inventory 2 ticks after teleport so the world transfer is complete
+                plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
+                    if (!p.isOnline()) return;
+                    if (!clearOnEnter) {
+                        ItemStack[] inv     = inventorySnapshots.get(p.getUniqueId());
+                        ItemStack[] armor   = armorSnapshots.get(p.getUniqueId());
+                        ItemStack   offhand = offhandSnapshots.get(p.getUniqueId());
+                        if (inv     != null) p.getInventory().setContents(inv);
+                        if (armor   != null) p.getInventory().setArmorContents(armor);
+                        if (offhand != null) p.getInventory().setItemInOffHand(offhand);
+                        p.updateInventory();
+                    }
+                    applyEntryEffects(p);
+                    log.info("Teleported " + p.getName() + " into " + instanceId);
+                }, 2L);
             }, delay);
         }
 
