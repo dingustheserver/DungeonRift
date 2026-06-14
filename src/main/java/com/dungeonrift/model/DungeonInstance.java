@@ -32,6 +32,13 @@ public class DungeonInstance {
     private final Map<UUID, Integer> extractionEntries   = new HashMap<>();
     private static final int MAX_EXTRACTION_ENTRIES = 3;
 
+    /** How many times the emergency pause has been released due to player leaving zone */
+    private int pauseExitCount = 0;
+    private static final int MAX_PAUSE_EXITS = 3;
+
+    /** Whether pig step music disc has been started for the collapse */
+    private boolean pigStepPlaying = false;
+
     // ── Timer ─────────────────────────────────────────────────────────────────
 
     private BukkitTask countdownTask;
@@ -127,7 +134,12 @@ public class DungeonInstance {
                 timerPaused     = false;
                 pausedForPlayer = null;
                 graceCountdown  = -1;
-                broadcast("§c⚠ Emergency pause expired. Timer resumed!");
+                pauseExitCount++;
+                if (pauseExitCount >= MAX_PAUSE_EXITS) {
+                    broadcast("§c⚠ Emergency pauses exhausted. Timer will no longer pause!");
+                } else {
+                    broadcast("§c⚠ Emergency pause expired. Timer resumed!");
+                }
             }
 
             // ── Normal tick ────────────────────────────────────────────────
@@ -138,6 +150,11 @@ public class DungeonInstance {
             int minutesLeft = secondsRemaining / 60;
             if (secondsRemaining % 60 == 0 && warnMinutes.contains(minutesLeft)) {
                 broadcast("§c⚠ " + minutesLeft + " minute(s) remaining!");
+                // XP pickup ping so the notification is audible
+                alivePlayers.forEach(uuid -> {
+                    Player pp = Bukkit.getPlayer(uuid);
+                    if (pp != null) pp.playSound(pp.getLocation(), Sound.ENTITY_EXPERIENCE_ORB_PICKUP, 1.0f, 1.0f);
+                });
             }
             if (secondsElapsed == EXTRACTION_COOLDOWN_SECONDS) {
                 broadcast("§a✔ The extraction portal is now active!");
@@ -148,16 +165,17 @@ public class DungeonInstance {
 
             // ── Safety net check ───────────────────────────────────────────
             // Only activates if enabled, timer is low, and a player is in zone
-            if (safetyEnabled && secondsRemaining > 0 && secondsRemaining <= safetyThreshold) {
+            if (safetyEnabled && pauseExitCount < MAX_PAUSE_EXITS
+                    && secondsRemaining > 0 && secondsRemaining <= safetyThreshold) {
                 for (UUID uuid : alivePlayers) {
                     if (extractionProgress.containsKey(uuid)) {
                         timerPaused     = true;
                         pausedForPlayer = uuid;
                         graceCountdown  = -1;
                         Player pp = Bukkit.getPlayer(uuid);
-                        if (pp != null) pp.sendMessage("§a[DungeonRift] §eTimer paused — finish extracting!");
+                        if (pp != null) pp.sendMessage("§a[DungeonRift] §eTimer paused — finish extracting! §7(" + (MAX_PAUSE_EXITS - pauseExitCount) + " pauses left)");
                         updateBossBar();
-                        tickExtractionProgress(); // still tick extraction while paused
+                        tickExtractionProgress();
                         return;
                     }
                 }
@@ -177,51 +195,136 @@ public class DungeonInstance {
     private void tickCollapse() {
         collapseTickCounter++;
         DungeonRift plugin = DungeonRift.get();
-        boolean soundsEnabled    = plugin.getConfig().getBoolean("instance.collapse.sounds-enabled",  true);
-        boolean weatherEnabled   = plugin.getConfig().getBoolean("instance.collapse.weather-enabled", true);
+        boolean soundsEnabled    = plugin.getConfig().getBoolean("instance.collapse.sounds-enabled",   true);
+        boolean weatherEnabled   = plugin.getConfig().getBoolean("instance.collapse.weather-enabled",  true);
         boolean lightningEnabled = plugin.getConfig().getBoolean("instance.collapse.lightning-enabled", true);
 
+        // Intensity: 0.0 at collapse start, 1.0 at 0 seconds remaining
+        int collapseStart = plugin.getConfig().getInt("instance.collapse.start-at-minutes-remaining", 2) * 60 + 30;
+        double intensity  = collapseStart > 0
+                ? Math.min(1.0, 1.0 - ((double) secondsRemaining / collapseStart))
+                : 1.0;
+
+        // ── Pig Step music — play once at collapse start ───────────────────
+        if (!pigStepPlaying && soundsEnabled) {
+            pigStepPlaying = true;
+            alivePlayers.forEach(uuid -> {
+                Player p = Bukkit.getPlayer(uuid);
+                if (p != null) p.playSound(p.getLocation(), Sound.MUSIC_DISC_PIGSTEP, 1.0f, 1.0f);
+            });
+        }
+
+        // ── Storm ─────────────────────────────────────────────────────────
         if (weatherEnabled) {
             world.setStorm(true);
             world.setThundering(true);
             world.setWeatherDuration(600);
         }
 
-        if (soundsEnabled && collapseTickCounter % 3 == 0) {
+        // ── Crumbling sounds — frequency increases with intensity ─────────
+        // At low intensity fire every ~5s; at high intensity every ~1s
+        int soundInterval = Math.max(1, (int) (5 - intensity * 4));
+        if (soundsEnabled && collapseTickCounter % soundInterval == 0) {
             Sound[] sounds = {
-                Sound.BLOCK_STONE_BREAK, Sound.BLOCK_GRAVEL_BREAK,
-                Sound.ENTITY_GENERIC_EXPLODE, Sound.BLOCK_ANCIENT_DEBRIS_BREAK,
-                Sound.ENTITY_LIGHTNING_BOLT_THUNDER
+                Sound.BLOCK_STONE_BREAK,         Sound.BLOCK_GRAVEL_BREAK,
+                Sound.BLOCK_ANCIENT_DEBRIS_BREAK, Sound.BLOCK_DEEPSLATE_BREAK,
+                Sound.ENTITY_GENERIC_EXPLODE
             };
-            Sound s = sounds[(collapseTickCounter / 3) % sounds.length];
+            Sound s = sounds[collapseTickCounter % sounds.length];
+            float vol = (float) (0.5 + intensity * 0.5);
             alivePlayers.forEach(uuid -> {
                 Player p = Bukkit.getPlayer(uuid);
-                if (p != null) p.playSound(p.getLocation(), s, 0.8f, 0.6f);
+                if (p != null) p.playSound(p.getLocation(), s, vol, 0.7f);
             });
         }
 
-        if (lightningEnabled && collapseTickCounter % 5 == 0) {
+        // ── Explosions — rare early, frequent late ────────────────────────
+        int explosionInterval = Math.max(2, (int) (20 - intensity * 18));
+        if (soundsEnabled && collapseTickCounter % explosionInterval == 0) {
             Random rng = new Random();
             alivePlayers.forEach(uuid -> {
                 Player p = Bukkit.getPlayer(uuid);
                 if (p == null) return;
-                double ox = (rng.nextDouble() - 0.5) * 30;
-                double oz = (rng.nextDouble() - 0.5) * 30;
-                world.strikeLightningEffect(p.getLocation().add(ox, 0, oz));
+                double ox = (rng.nextDouble() - 0.5) * 40;
+                double oz = (rng.nextDouble() - 0.5) * 40;
+                Location expLoc = p.getLocation().add(ox, 0, oz);
+                // Visual explosion (no block damage)
+                world.createExplosion(expLoc, 0f, false, false);
             });
         }
 
-        if (collapseTickCounter % 10 == 0) {
+        // ── Lightning — damages ground, sets fires, leaves magma ─────────
+        int lightningInterval = Math.max(2, (int) (8 - intensity * 6));
+        if (lightningEnabled && collapseTickCounter % lightningInterval == 0) {
+            Random rng = new Random();
+            int strikes = 1 + (int) (intensity * 2); // 1 at start, up to 3 at end
+            for (int i = 0; i < strikes; i++) {
+                alivePlayers.forEach(uuid -> {
+                    Player p = Bukkit.getPlayer(uuid);
+                    if (p == null) return;
+                    double ox = (rng.nextDouble() - 0.5) * 50;
+                    double oz = (rng.nextDouble() - 0.5) * 50;
+                    Location strikeLoc = p.getLocation().add(ox, 0, oz);
+
+                    // Real lightning strike — sets fire
+                    world.strikeLightning(strikeLoc);
+
+                    // Crack the ground: place magma blocks near strike
+                    plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
+                        crackGround(strikeLoc);
+                    }, 2L);
+                });
+            }
+        }
+
+        // ── Darkness — stronger as intensity rises ────────────────────────
+        int darkInterval = Math.max(3, (int) (15 - intensity * 12));
+        if (collapseTickCounter % darkInterval == 0) {
+            int darkAmplifier = intensity > 0.7 ? 1 : 0;
             alivePlayers.forEach(uuid -> {
                 Player p = Bukkit.getPlayer(uuid);
                 if (p != null) p.addPotionEffect(new org.bukkit.potion.PotionEffect(
-                        org.bukkit.potion.PotionEffectType.DARKNESS, 60, 0, false, false));
+                        org.bukkit.potion.PotionEffectType.DARKNESS, 80, darkAmplifier, false, false));
             });
         }
 
-        if (secondsRemaining == 60) broadcast("§4§l⚠ THE RIFT IS COLLAPSING! ⚠");
-        if (secondsRemaining == 30) broadcast("§4§l☠ 30 SECONDS — GET TO THE PORTAL! ☠");
-        if (secondsRemaining == 10) broadcast("§4§l☠ 10 SECONDS! ☠");
+        // ── Milestone broadcasts ──────────────────────────────────────────
+        if (secondsRemaining == 60)  broadcast("§4§l⚠ THE RIFT IS COLLAPSING! ⚠");
+        if (secondsRemaining == 30)  broadcast("§4§l☠ 30 SECONDS — GET OUT OF THE RIFT! ☠");
+        if (secondsRemaining == 10)  broadcast("§4§l☠ 10 SECONDS! ☠");
+    }
+
+    /**
+     * Places cracks (cobblestone, gravel, magma) around a lightning strike location
+     * on the surface blocks to simulate ground cracking.
+     */
+    private void crackGround(Location centre) {
+        Random rng = new Random();
+        Material[] crackMaterials = {
+            Material.MAGMA_BLOCK, Material.CRACKED_STONE_BRICKS,
+            Material.COBBLESTONE,  Material.GRAVEL
+        };
+        int radius = 2 + (int)(rng.nextDouble() * 2); // 2–3 block radius
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dz = -radius; dz <= radius; dz++) {
+                if (dx * dx + dz * dz > radius * radius) continue;
+                if (rng.nextDouble() > 0.4) continue; // only affect ~40% of blocks
+
+                Location check = centre.clone().add(dx, 0, dz);
+                // Find the surface block
+                check = check.getWorld().getHighestBlockAt(check).getLocation();
+                Material existing = check.getBlock().getType();
+
+                // Only crack solid non-air, non-fluid surface blocks
+                if (existing.isSolid() && !existing.name().contains("LOG")
+                        && !existing.name().contains("LEAVES")
+                        && !existing.name().contains("CHEST")
+                        && existing != Material.BEDROCK) {
+                    Material crack = crackMaterials[rng.nextInt(crackMaterials.length)];
+                    check.getBlock().setType(crack, false);
+                }
+            }
+        }
     }
 
     // ── Boss bar ──────────────────────────────────────────────────────────────
@@ -389,6 +492,7 @@ public class DungeonInstance {
         extractionProgress.clear();
         lastCooldownMessage.clear();
         extractionEntries.clear();
+        pigStepPlaying = false;
 
         state = State.CLOSED;
         DungeonRift.get().getInstanceManager().destroyInstance(this);

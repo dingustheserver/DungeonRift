@@ -61,7 +61,7 @@ instance:
   collapse:
     # Minutes remaining when the world starts its collapse sequence
     # e.g. 1 = collapse effects begin at 1 minute left
-    start-at-minutes-remaining: 1
+    start-at-minutes-remaining: 2
 
     # Sound effects played to all players every few seconds during collapse
     sounds-enabled: true
