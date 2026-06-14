@@ -2,11 +2,7 @@ package com.dungeonrift.manager;
 
 import com.dungeonrift.DungeonRift;
 import com.dungeonrift.model.DungeonInstance;
-import org.bukkit.Bukkit;
-import org.bukkit.Location;
-import org.bukkit.Sound;
-import org.bukkit.World;
-import org.bukkit.WorldCreator;
+import org.bukkit.*;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.potion.PotionEffect;
@@ -35,14 +31,12 @@ public class InstanceManager {
     public void spawnInstance(List<Player> players) {
         String instanceId = "dungeon_" + UUID.randomUUID().toString().substring(0, 8);
 
-        // Clone template files synchronously
         File cloned = plugin.getTemplateManager().cloneTemplateTo(instanceId);
         if (cloned == null) {
             players.forEach(p -> p.sendMessage("§c[DungeonRift] Failed to load dungeon. Please try again."));
             return;
         }
 
-        // Create world synchronously on the main thread
         World world = new WorldCreator(instanceId).createWorld();
         if (world == null) {
             log.severe("Could not load instance world: " + instanceId);
@@ -52,48 +46,40 @@ public class InstanceManager {
 
         log.info("Instance world loaded: " + instanceId);
 
+        // Hub loadout: save each player's inventory before clearing
+        boolean clearOnEnter = plugin.getConfig().getBoolean("loot.clear-on-enter", false);
+        if (clearOnEnter) players.forEach(p -> p.getInventory().clear());
+
         String templateName = plugin.getTemplateManager().getActiveTemplateName();
         DungeonInstance di  = new DungeonInstance(instanceId, world, templateName, players);
 
         activeInstances.put(instanceId, di);
         players.forEach(p -> playerInstance.put(p.getUniqueId(), instanceId));
 
-        boolean clearOnEnter = plugin.getConfig().getBoolean("loot.clear-on-enter", true);
-        if (clearOnEnter) players.forEach(p -> p.getInventory().clear());
-
         Location spawnLoc = buildSpawnLocation(world);
 
-        // Teleport each player with a 2-tick gap between them.
-        // This gives the server time to process each cross-world move
-        // before starting the next, ensuring all party members arrive.
-        // Timer starts 5 ticks after the last player is teleported.
+        // Staggered teleport — 2 ticks between each player
         List<Player> snapshot = new ArrayList<>(players);
         for (int i = 0; i < snapshot.size(); i++) {
-            final Player p = snapshot.get(i);
-            final long delay = i * 2L; // 2 ticks between each player
+            final Player p     = snapshot.get(i);
+            final long   delay = (i * 2L) + 1L;
             plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
                 if (!p.isOnline()) return;
                 p.teleport(spawnLoc);
                 applyEntryEffects(p);
                 log.info("Teleported " + p.getName() + " into " + instanceId);
-            }, delay + 1L); // +1 so even first player gets at least 1 tick
+            }, delay);
         }
 
-        // Start timer after all teleports should be done (last delay + 5 ticks buffer)
         long timerDelay = (snapshot.size() * 2L) + 5L;
         plugin.getServer().getScheduler().runTaskLater(plugin, di::startTimer, timerDelay);
 
         log.info("Instance started: " + instanceId + " | players: " + players.size());
     }
 
-    // ── Entry effects ─────────────────────────────────────────────────────────
-
     private void applyEntryEffects(Player player) {
-        int durationTicks = 60; // 3 seconds
-        player.addPotionEffect(new PotionEffect(
-                PotionEffectType.BLINDNESS, durationTicks, 0, false, false));
-        player.addPotionEffect(new PotionEffect(
-                PotionEffectType.SLOWNESS, durationTicks, 4, false, false));
+        player.addPotionEffect(new PotionEffect(PotionEffectType.BLINDNESS, 60, 0, false, false));
+        player.addPotionEffect(new PotionEffect(PotionEffectType.SLOWNESS,  60, 4, false, false));
         player.playSound(player.getLocation(), Sound.BLOCK_BEACON_ACTIVATE, 1.0f, 1.0f);
     }
 
@@ -106,15 +92,13 @@ public class InstanceManager {
     }
 
     public void shutdownAll() {
-        new HashSet<>(activeInstances.values())
-                .forEach(di -> di.close("Server shutdown"));
+        new HashSet<>(activeInstances.values()).forEach(di -> di.close("Server shutdown"));
     }
 
     private void unloadAndDeleteWorld(String worldName) {
         World world = Bukkit.getWorld(worldName);
         if (world != null) {
-            Location hub = buildHubLocation();
-            world.getPlayers().forEach(p -> p.teleport(hub));
+            world.getPlayers().forEach(p -> p.teleport(buildHubReturnLocation()));
             Bukkit.unloadWorld(world, false);
         }
         deleteFolder(new File(Bukkit.getWorldContainer(), worldName));
@@ -123,18 +107,24 @@ public class InstanceManager {
 
     // ── Hub return ────────────────────────────────────────────────────────────
 
+    /**
+     * Returns a player to the hub.
+     * Always teleports to hub-return location.
+     * @param playSuccessSound plays challenge complete sound on arrival (extraction only)
+     */
     public void returnPlayerToHub(Player player, boolean playSuccessSound) {
         playerInstance.remove(player.getUniqueId());
-        Location hub = buildHubLocation();
+        Location hub = buildHubReturnLocation();
+
         plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
             if (!player.isOnline()) return;
             player.teleport(hub);
+
             if (playSuccessSound) {
                 plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
-                    if (player.isOnline()) {
+                    if (player.isOnline())
                         player.playSound(player.getLocation(),
                                 Sound.UI_TOAST_CHALLENGE_COMPLETE, 1.0f, 1.0f);
-                    }
                 }, 5L);
             }
         }, 1L);
@@ -159,32 +149,44 @@ public class InstanceManager {
 
     public boolean isInInstance(UUID uuid) { return playerInstance.containsKey(uuid); }
 
-    // ── Location helpers ──────────────────────────────────────────────────────
+    // ── Location builders ─────────────────────────────────────────────────────
 
     private Location buildSpawnLocation(World world) {
         FileConfiguration cfg = plugin.getConfig();
         return new Location(world,
-                cfg.getDouble("instance.instance-spawn.x",   0.5),
-                cfg.getDouble("instance.instance-spawn.y",  65.0),
-                cfg.getDouble("instance.instance-spawn.z",   0.5),
+                cfg.getDouble("instance.instance-spawn.x",    0.5),
+                cfg.getDouble("instance.instance-spawn.y",   65.0),
+                cfg.getDouble("instance.instance-spawn.z",    0.5),
                 (float) cfg.getDouble("instance.instance-spawn.yaw",   0),
                 (float) cfg.getDouble("instance.instance-spawn.pitch", 0));
     }
 
-    private Location buildHubLocation() {
+    /** Hub world general spawn (first join) */
+    public Location buildHubSpawnLocation() {
         FileConfiguration cfg = plugin.getConfig();
         String hubName = cfg.getString("hub-world", "world_hub");
         World hub = Bukkit.getWorld(hubName);
-        if (hub == null) {
-            log.warning("Hub world '" + hubName + "' not found! Using default world.");
-            hub = Bukkit.getWorlds().get(0);
-        }
+        if (hub == null) { hub = Bukkit.getWorlds().get(0); }
         return new Location(hub,
                 cfg.getDouble("hub-spawn.x",   0.5),
                 cfg.getDouble("hub-spawn.y",  64.0),
                 cfg.getDouble("hub-spawn.z",   0.5),
                 (float) cfg.getDouble("hub-spawn.yaw",   0),
                 (float) cfg.getDouble("hub-spawn.pitch", 0));
+    }
+
+    /** Hub return point — where players arrive after a rift */
+    public Location buildHubReturnLocation() {
+        FileConfiguration cfg = plugin.getConfig();
+        String hubName = cfg.getString("hub-world", "world_hub");
+        World hub = Bukkit.getWorld(hubName);
+        if (hub == null) { hub = Bukkit.getWorlds().get(0); }
+        return new Location(hub,
+                cfg.getDouble("hub-return.x",   0.5),
+                cfg.getDouble("hub-return.y",  64.0),
+                cfg.getDouble("hub-return.z",   0.5),
+                (float) cfg.getDouble("hub-return.yaw",   0),
+                (float) cfg.getDouble("hub-return.pitch", 0));
     }
 
     // ── File helpers ──────────────────────────────────────────────────────────

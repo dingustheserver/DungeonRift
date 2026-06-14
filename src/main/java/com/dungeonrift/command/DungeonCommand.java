@@ -189,6 +189,74 @@ public class DungeonCommand implements CommandExecutor, TabCompleter {
                         + " §8(radius: " + er + ")");
             }
 
+            // ── /dungeon sethubreturn ─────────────────────────────────────────
+            case "sethubreturn" -> {
+                if (!(sender instanceof Player player)) {
+                    sender.sendMessage("§cMust be run by a player.");
+                    return true;
+                }
+                Location loc = player.getLocation();
+                plugin.getConfig().set("hub-return.x",     loc.getX());
+                plugin.getConfig().set("hub-return.y",     loc.getY());
+                plugin.getConfig().set("hub-return.z",     loc.getZ());
+                plugin.getConfig().set("hub-return.yaw",   (double) loc.getYaw());
+                plugin.getConfig().set("hub-return.pitch", (double) loc.getPitch());
+                plugin.saveConfig();
+                sender.sendMessage("§aHub return point set to: " + formatLocation(loc));
+                sender.sendMessage("§7Players returning from a rift will land here.");
+            }
+
+            // ── /dungeon sethubspawn ──────────────────────────────────────────
+            case "sethubspawn" -> {
+                if (!(sender instanceof Player player)) {
+                    sender.sendMessage("§cMust be run by a player.");
+                    return true;
+                }
+                Location loc = player.getLocation();
+                plugin.getConfig().set("hub-spawn.x",     loc.getX());
+                plugin.getConfig().set("hub-spawn.y",     loc.getY());
+                plugin.getConfig().set("hub-spawn.z",     loc.getZ());
+                plugin.getConfig().set("hub-spawn.yaw",   (double) loc.getYaw());
+                plugin.getConfig().set("hub-spawn.pitch", (double) loc.getPitch());
+                plugin.saveConfig();
+                sender.sendMessage("§aHub world spawn set to: " + formatLocation(loc));
+                sender.sendMessage("§7New players and hub respawns will land here.");
+            }
+
+            // ── /dungeon setqueueportal ───────────────────────────────────────
+            case "setqueueportal" -> {
+                if (!(sender instanceof Player player)) {
+                    sender.sendMessage("§cMust be run by a player.");
+                    return true;
+                }
+                Location loc = player.getLocation();
+                plugin.getConfig().set("queue-portal.enabled", true);
+                plugin.getConfig().set("queue-portal.world",   player.getWorld().getName());
+                plugin.getConfig().set("queue-portal.x",       loc.getX());
+                plugin.getConfig().set("queue-portal.y",       loc.getY());
+                plugin.getConfig().set("queue-portal.z",       loc.getZ());
+                plugin.saveConfig();
+                sender.sendMessage("§aQueue portal set and §2enabled§a at: " + formatLocation(loc));
+                sender.sendMessage("§7Players stepping within §e"
+                        + plugin.getConfig().getDouble("queue-portal.radius", 1.5)
+                        + " blocks §7will be queued automatically.");
+                sender.sendMessage("§7Disable with: §e/dungeon queueportal disable");
+            }
+
+            // ── /dungeon queueportal enable|disable ───────────────────────────
+            case "queueportal" -> {
+                if (args.length < 2) {
+                    boolean en = plugin.getConfig().getBoolean("queue-portal.enabled", false);
+                    sender.sendMessage("§7Queue portal is currently: " + (en ? "§aENABLED" : "§cDISABLED"));
+                    sender.sendMessage("§7Use: §e/dungeon queueportal enable §7or §e/dungeon queueportal disable");
+                    return true;
+                }
+                boolean enable = args[1].equalsIgnoreCase("enable");
+                plugin.getConfig().set("queue-portal.enabled", enable);
+                plugin.saveConfig();
+                sender.sendMessage("§7Queue portal " + (enable ? "§aENABLED" : "§cDISABLED") + "§7.");
+            }
+
             default -> sendHelp(sender);
         }
         return true;
@@ -201,7 +269,8 @@ public class DungeonCommand implements CommandExecutor, TabCompleter {
                                       String alias, String[] args) {
         if (args.length == 1) {
             return List.of("set", "list", "status", "reload", "close",
-                    "setspawn", "setextraction", "setextractionradius", "locations");
+                    "setspawn", "setextraction", "setextractionradius", "locations",
+                    "sethubreturn", "sethubspawn", "setqueueportal", "queueportal");
         }
         if (args.length == 2 && args[0].equalsIgnoreCase("set")) {
             return plugin.getTemplateManager().listTemplates();
@@ -222,6 +291,10 @@ public class DungeonCommand implements CommandExecutor, TabCompleter {
         sender.sendMessage("§e/dungeon setextraction           §7- Set extraction portal §8(stand there first)");
         sender.sendMessage("§e/dungeon setextractionradius <n> §7- Set portal trigger radius");
         sender.sendMessage("§e/dungeon locations               §7- Show current locations");
+        sender.sendMessage("§e/dungeon sethubreturn            §7- Set rift return point §8(stand there first)");
+        sender.sendMessage("§e/dungeon sethubspawn             §7- Set hub world spawn §8(stand there first)");
+        sender.sendMessage("§e/dungeon setqueueportal          §7- Set in-world queue portal §8(stand there first)");
+        sender.sendMessage("§e/dungeon queueportal enable|disable §7- Toggle portal");
     }
 
     private String formatLocation(Location loc) {

@@ -3,8 +3,10 @@ package com.dungeonrift;
 import com.dungeonrift.command.DungeonCommand;
 import com.dungeonrift.command.RiftCommand;
 import com.dungeonrift.listener.ExtractionListener;
+import com.dungeonrift.listener.HubListener;
 import com.dungeonrift.listener.InstanceLifecycleListener;
 import com.dungeonrift.listener.PlayerDeathListener;
+import com.dungeonrift.listener.QueuePortalListener;
 import com.dungeonrift.manager.InstanceManager;
 import com.dungeonrift.manager.PartyManager;
 import com.dungeonrift.manager.QueueManager;
@@ -67,6 +69,8 @@ public class DungeonRift extends JavaPlugin {
         pm.registerEvents(new ExtractionListener(this),        this);
         pm.registerEvents(new InstanceLifecycleListener(this), this);
         pm.registerEvents(new PlayerDeathListener(this),       this);
+        pm.registerEvents(new HubListener(this),               this);
+        pm.registerEvents(new QueuePortalListener(this),       this);
     }
 
     private void registerCommands() {
