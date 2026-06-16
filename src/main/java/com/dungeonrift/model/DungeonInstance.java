@@ -59,6 +59,10 @@ public class DungeonInstance {
     private int       collapseTickCounter = 0;
     private boolean   pigStepPlaying      = false;
 
+    /** Cached extraction portal location — set at construction, used for safe-zone checks. */
+    private Location extractionPortalLocation;
+    private double   extractionSafeRadius;
+
     // ── Vein generation ───────────────────────────────────────────────────────
 
     /** Tracks seconds at which veins have already been spawned to avoid duplicates. */
