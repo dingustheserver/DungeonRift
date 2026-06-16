@@ -2,11 +2,9 @@ package com.dungeonrift.command;
 
 import com.dungeonrift.DungeonRift;
 import com.dungeonrift.model.DungeonInstance;
+import org.bukkit.Axis;
 import org.bukkit.Location;
 import org.bukkit.Material;
-import org.bukkit.block.Block;
-import org.bukkit.block.data.type.EndPortalFrame;
-import org.bukkit.block.BlockFace;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
@@ -290,81 +288,40 @@ public class DungeonCommand implements CommandExecutor, TabCompleter {
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     /**
-     * Builds a decorative (non-functional) end portal frame structure
-     * at the given location. The frame is a 3×3 ring of portal frames
-     * with obsidian pillars and a crying obsidian accent — similar in
-     * feel to an end portal but does not activate.
+     * Places a decorative 3-wide x 8-tall nether portal at the given location.
      *
-     * Layout (top-down, Y = loc.getBlockY()):
-     *   F F F
-     *   F   F   (centre is the trigger zone)
-     *   F F F
-     * Frames face inward. Obsidian pillars rise 3 blocks at corners.
+     * A nether portal only teleports when it has a complete valid obsidian frame.
+     * We place the NETHER_PORTAL blocks directly with NO obsidian frame at all,
+     * so Minecraft never considers them functional — pure purple swirl, no teleport.
+     *
+     * The portal is oriented to face North/South (along the Z axis) so it looks
+     * like a doorway the player walks toward from the front.
+     * Stand where you want the centre bottom of the portal and run the command.
      */
     private void buildQueuePortalStructure(Location centre) {
         org.bukkit.World w = centre.getWorld();
         if (w == null) return;
 
         int cx = centre.getBlockX();
-        int cy = centre.getBlockY() - 1; // place frame level at foot level
+        int cy = centre.getBlockY();     // bottom of portal at foot level
         int cz = centre.getBlockZ();
 
-        // ── Outer obsidian base ring (5×5 footprint, 1 block thick border) ──
-        for (int dx = -2; dx <= 2; dx++) {
-            for (int dz = -2; dz <= 2; dz++) {
-                // Only the border
-                if (Math.abs(dx) == 2 || Math.abs(dz) == 2) {
-                    w.getBlockAt(cx + dx, cy, cz + dz).setType(Material.OBSIDIAN, false);
+        // 3 wide (cx-1, cx, cx+1) x 8 tall (cy to cy+7)
+        // Oriented along X axis so the portal face is visible looking North/South
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dy = 0; dy < 8; dy++) {
+                org.bukkit.block.Block b = w.getBlockAt(cx + dx, cy + dy, cz);
+                b.setType(Material.NETHER_PORTAL, false);
+                // Set axis so all three columns share the same orientation
+                if (b.getBlockData() instanceof org.bukkit.block.data.Orientable o) {
+                    o.setAxis(org.bukkit.Axis.X);
+                    b.setBlockData(o, false);
                 }
             }
         }
-
-        // ── Inner portal frame ring (3×3, facing inward) ─────────────────
-        // Cardinal positions on the 3×3 ring
-        int[][] framePositions = {
-            {-1, -1}, {0, -1}, {1, -1}, // South row
-            {-1,  1}, {0,  1}, {1,  1}, // North row
-            {-1,  0},          {1,  0}  // East/West sides
-        };
-        // Which direction each frame faces (toward centre)
-        org.bukkit.block.BlockFace[] faces = {
-            org.bukkit.block.BlockFace.NORTH, org.bukkit.block.BlockFace.NORTH,
-            org.bukkit.block.BlockFace.NORTH,
-            org.bukkit.block.BlockFace.SOUTH, org.bukkit.block.BlockFace.SOUTH,
-            org.bukkit.block.BlockFace.SOUTH,
-            org.bukkit.block.BlockFace.EAST,  org.bukkit.block.BlockFace.WEST
-        };
-
-        for (int i = 0; i < framePositions.length; i++) {
-            int fx = cx + framePositions[i][0];
-            int fz = cz + framePositions[i][1];
-            org.bukkit.block.Block b = w.getBlockAt(fx, cy + 1, fz);
-            b.setType(Material.END_PORTAL_FRAME, false);
-            if (b.getBlockData() instanceof org.bukkit.block.data.type.EndPortalFrame epf) {
-                epf.setFacing(faces[i]);
-                epf.setEye(false); // no eye = non-functional
-                b.setBlockData(epf, false);
-            }
-        }
-
-        // ── Crying obsidian accents at corners ────────────────────────────
-        int[][] corners = {{-2, -2}, {2, -2}, {-2, 2}, {2, 2}};
-        for (int[] c : corners) {
-            for (int h = 0; h <= 2; h++) {
-                w.getBlockAt(cx + c[0], cy + h, cz + c[1])
-                        .setType(Material.CRYING_OBSIDIAN, false);
-            }
-        }
-
-        // ── Purpur pillar accents on sides ────────────────────────────────
-        int[][] sidePillars = {{0, -2}, {0, 2}, {-2, 0}, {2, 0}};
-        for (int[] sp : sidePillars) {
-            w.getBlockAt(cx + sp[0], cy + 1, cz + sp[1]).setType(Material.PURPUR_PILLAR, false);
-            w.getBlockAt(cx + sp[0], cy + 2, cz + sp[1]).setType(Material.PURPUR_PILLAR, false);
-        }
     }
 
-    private void sendHelp(CommandSender sender) {
+        private void sendHelp(CommandSender sender) {
         sender.sendMessage("§6=== DungeonRift Admin ===");
         sender.sendMessage("§e/dungeon set <template>          §7- Swap active dungeon");
         sender.sendMessage("§e/dungeon list                    §7- List templates");

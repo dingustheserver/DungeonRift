@@ -2,6 +2,9 @@ package com.dungeonrift.model;
 
 import com.dungeonrift.DungeonRift;
 import org.bukkit.*;
+import org.bukkit.FireworkEffect;
+import org.bukkit.entity.Firework;
+import org.bukkit.inventory.meta.FireworkMeta;
 import org.bukkit.boss.BarColor;
 import org.bukkit.boss.BarStyle;
 import org.bukkit.boss.BossBar;
@@ -281,6 +284,25 @@ public class DungeonInstance {
             });
         }
 
+        // ── Firework explosions ───────────────────────────────────────────
+        // Frequency and count scale with intensity — sparse early, chaotic late
+        int fireworkInterval = Math.max(1, (int) (6 - intensity * 5));
+        if (collapseTickCounter % fireworkInterval == 0) {
+            Random rng    = new Random();
+            int    count  = 1 + (int) (intensity * 3); // 1 early, up to 4 late
+            alivePlayers.forEach(uuid -> {
+                Player p = Bukkit.getPlayer(uuid);
+                if (p == null) return;
+                for (int f = 0; f < count; f++) {
+                    double ox = (rng.nextDouble() - 0.5) * 30;
+                    double oy = rng.nextDouble() * 10 + 2; // 2–12 blocks up
+                    double oz = (rng.nextDouble() - 0.5) * 30;
+                    Location fwLoc = p.getLocation().add(ox, oy, oz);
+                    spawnCollapseFirework(fwLoc, intensity, rng);
+                }
+            });
+        }
+
         // ── Magma + skulk veins — appear at 90s, 60s, 30s once each ───────
         spawnVeinAtThreshold(150, intensity);
         spawnVeinAtThreshold(90,  intensity);
@@ -543,6 +565,57 @@ public class DungeonInstance {
                 above.getBlock().setType(Material.FIRE, false);
             }
         }
+    }
+
+    /**
+     * Spawns a single collapse firework at the given location.
+     * Low intensity = crackle/star bursts; high intensity = large balls and blasts.
+     * Colors shift from orange/yellow (early) toward deep red/crimson (late).
+     */
+    private void spawnCollapseFirework(Location loc, double intensity, Random rng) {
+        if (loc.getWorld() == null) return;
+
+        Firework fw = (Firework) loc.getWorld().spawnEntity(loc, org.bukkit.entity.EntityType.FIREWORK_ROCKET);
+        FireworkMeta meta = fw.getFireworkMeta();
+
+        // Color palette — early = orange/gold, late = dark red/crimson
+        Color[] earlyColors = { Color.ORANGE, Color.YELLOW, Color.fromRGB(255, 140, 0) };
+        Color[] lateColors  = { Color.RED, Color.fromRGB(180, 0, 0), Color.fromRGB(100, 0, 0), Color.MAROON };
+        Color[] fadeColors  = { Color.BLACK, Color.GRAY, Color.fromRGB(40, 0, 0) };
+
+        Color primary = intensity > 0.6
+                ? lateColors[rng.nextInt(lateColors.length)]
+                : earlyColors[rng.nextInt(earlyColors.length)];
+        Color fade    = fadeColors[rng.nextInt(fadeColors.length)];
+
+        // Effect type — crackle and star early, ball and burst late
+        FireworkEffect.Type type;
+        double typeRoll = rng.nextDouble();
+        if (intensity < 0.3) {
+            type = typeRoll < 0.6 ? FireworkEffect.Type.STAR : FireworkEffect.Type.CREEPER;
+        } else if (intensity < 0.6) {
+            type = typeRoll < 0.5 ? FireworkEffect.Type.BALL : FireworkEffect.Type.BURST;
+        } else {
+            type = typeRoll < 0.4 ? FireworkEffect.Type.BALL_LARGE
+                 : typeRoll < 0.7 ? FireworkEffect.Type.BURST
+                 : FireworkEffect.Type.CREEPER;
+        }
+
+        FireworkEffect effect = FireworkEffect.builder()
+                .withColor(primary)
+                .withFade(fade)
+                .with(type)
+                .trail(intensity > 0.5 && rng.nextBoolean())  // trail on high intensity
+                .flicker(rng.nextDouble() < 0.4)              // occasional twinkle
+                .build();
+
+        meta.addEffect(effect);
+        // Power 0 = explodes almost immediately at current position (no travel)
+        meta.setPower(0);
+        fw.setFireworkMeta(meta);
+
+        // Detonate instantly so it explodes in place rather than flying up
+        fw.detonate();
     }
 
     private boolean canInfect(Material m) {
