@@ -83,6 +83,14 @@ public class DungeonInstance {
         int collapseMinutes = DungeonRift.get().getConfig()
                 .getInt("instance.collapse.start-at-minutes-remaining", 2);
         collapseStartSeconds = collapseMinutes * 60 + 30;
+        // Cache extraction portal location so we always have the right coords
+        // even if the config changes mid-run
+        double epx = DungeonRift.get().getConfig().getDouble("instance.extraction-portal.x", 0);
+        double epy = DungeonRift.get().getConfig().getDouble("instance.extraction-portal.y", 64);
+        double epz = DungeonRift.get().getConfig().getDouble("instance.extraction-portal.z", 0);
+        extractionPortalLocation = new Location(world, epx, epy, epz);
+        extractionSafeRadius = DungeonRift.get().getConfig()
+                .getDouble("instance.extraction-zone-radius", 3.0) + 8.0; // generous buffer
         bossBar = Bukkit.createBossBar(buildBarTitle(), BarColor.GREEN, BarStyle.SOLID);
     }
 
@@ -244,10 +252,12 @@ public class DungeonInstance {
                     double oz = (rng.nextDouble() - 0.5) * 50;
                     // ── Find ground level so lightning actually hits the terrain ──
                     Location approx = p.getLocation().add(ox, 0, oz);
-                    // Skip if too close to extraction portal
+                    // Check both the approx AND the actual ground point
                     if (isNearExtractionPortal(approx)) return;
                     Location groundLoc = world.getHighestBlockAt(approx)
                             .getLocation().add(0, 1, 0);
+                    // Double-check after resolving actual ground height
+                    if (isNearExtractionPortal(groundLoc)) return;
                     world.strikeLightning(groundLoc);
                     Location surface = groundLoc.clone().subtract(0, 1, 0);
                     plugin.getServer().getScheduler().runTaskLater(plugin,
@@ -541,19 +551,23 @@ public class DungeonInstance {
 
     /**
      * Returns true if a location is within the extraction zone safe radius.
+     * Uses a flat 2D XZ check so height differences cannot bypass it.
      * No skulk, magma, lightning, or fire should touch this area.
      */
     private boolean isNearExtractionPortal(Location loc) {
-        double ex     = DungeonRift.get().getConfig().getDouble("instance.extraction-portal.x", 0);
-        double ey     = DungeonRift.get().getConfig().getDouble("instance.extraction-portal.y", 64);
-        double ez     = DungeonRift.get().getConfig().getDouble("instance.extraction-portal.z", 0);
-        // Safe radius = extraction zone radius + 5 block buffer
-        double safeR  = DungeonRift.get().getConfig()
-                .getDouble("instance.extraction-zone-radius", 3.0) + 5.0;
-        double dx = loc.getX() - ex;
-        double dy = loc.getY() - ey;
-        double dz = loc.getZ() - ez;
-        return (dx * dx + dy * dy + dz * dz) <= (safeR * safeR);
+        if (extractionPortalLocation == null) return false;
+        // 2D XZ only — ignoring Y so blocks at different heights are still protected
+        double dx = loc.getX() - extractionPortalLocation.getX();
+        double dz = loc.getZ() - extractionPortalLocation.getZ();
+        return (dx * dx + dz * dz) <= (extractionSafeRadius * extractionSafeRadius);
+    }
+
+    /**
+     * Called by InstanceLifecycleListener to check if a lightning strike
+     * is inside the extraction safe zone and should be cancelled.
+     */
+    public boolean isExtractionSafeZone(Location loc) {
+        return isNearExtractionPortal(loc);
     }
 
     // ── Boss bar ──────────────────────────────────────────────────────────────
@@ -674,6 +688,9 @@ public class DungeonInstance {
         if (player.getUniqueId().equals(pausedForPlayer)) { timerPaused = false; pausedForPlayer = null; }
         stopPigStep(player);
         player.resetTitle();
+        // 2 seconds of blindness on extraction — cinematic transition feel
+        player.addPotionEffect(new org.bukkit.potion.PotionEffect(
+                org.bukkit.potion.PotionEffectType.BLINDNESS, 40, 0, false, false));
         player.sendMessage("§8[§6DungeonRift§8] §a§lEXTRACTED! §r§aYour loot has been kept.");
         player.sendTitle("§a§lEXTRACTED!", "", 10, 60, 20);
         DungeonRift.get().getInstanceManager().returnPlayerToHub(player, true);

@@ -45,6 +45,25 @@ public class InstanceLifecycleListener implements Listener {
     }
 
     /**
+     * Cancel any lightning strike that lands inside an instance's extraction
+     * safe zone. Real lightning fires this event; we intercept it here so
+     * even indirect fire spread from strikes near the zone cannot occur.
+     */
+    @EventHandler(priority = EventPriority.HIGHEST)
+    public void onLightningStrike(LightningStrikeEvent event) {
+        Location strikeLoc = event.getLightning().getLocation();
+
+        // Find any instance running in this world
+        for (DungeonInstance instance : plugin.getInstanceManager().getAllInstances()) {
+            if (!instance.getWorld().equals(strikeLoc.getWorld())) continue;
+            if (instance.isExtractionSafeZone(strikeLoc)) {
+                event.setCancelled(true);
+                return;
+            }
+        }
+    }
+
+    /**
      * Safety net: if a player somehow ends up in a different world than their
      * registered instance (e.g. an admin /tp), clean up their instance state.
      */
