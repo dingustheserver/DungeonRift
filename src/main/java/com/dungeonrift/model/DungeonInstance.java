@@ -243,11 +243,12 @@ public class DungeonInstance {
                     double ox = (rng.nextDouble() - 0.5) * 50;
                     double oz = (rng.nextDouble() - 0.5) * 50;
                     // ── Find ground level so lightning actually hits the terrain ──
-                    Location approx   = p.getLocation().add(ox, 0, oz);
+                    Location approx = p.getLocation().add(ox, 0, oz);
+                    // Skip if too close to extraction portal
+                    if (isNearExtractionPortal(approx)) return;
                     Location groundLoc = world.getHighestBlockAt(approx)
-                            .getLocation().add(0, 1, 0); // 1 above surface = strike point
+                            .getLocation().add(0, 1, 0);
                     world.strikeLightning(groundLoc);
-                    // Tentacles grow from the surface block, not strike point
                     Location surface = groundLoc.clone().subtract(0, 1, 0);
                     plugin.getServer().getScheduler().runTaskLater(plugin,
                             () -> spawnTentacles(surface, rng), 2L);
@@ -298,9 +299,9 @@ public class DungeonInstance {
                 double ox = (rng.nextDouble() - 0.5) * 80;
                 double oz = (rng.nextDouble() - 0.5) * 80;
                 Location origin = p.getLocation().add(ox, 0, oz);
-                long startDelay  = v * 5L; // stagger vein starts
-
-                // Each vein: place seed, then spread outward over several ticks
+                // Skip if origin is too close to extraction portal
+                if (isNearExtractionPortal(origin)) continue;
+                long startDelay = v * 5L;
                 DungeonRift.get().getServer().getScheduler().runTaskLater(
                         DungeonRift.get(),
                         () -> startInfectionVein(origin, moreSkulk, rng),
@@ -326,8 +327,8 @@ public class DungeonInstance {
             surface.getBlock().setType(moreSkulk ? Material.SCULK : Material.MAGMA_BLOCK, false);
         }
 
-        // Spread outward: 6 waves, each 1 block further, fired 1s apart
-        int waves = 6 + rng.nextInt(4); // 6–9 waves
+        // Spread outward: 10–14 waves for much bigger veins, fired 1s apart
+        int waves = 10 + rng.nextInt(5); // 10–14 waves — much larger than before
         for (int wave = 1; wave <= waves; wave++) {
             final int   radius     = wave;
             final long  delay      = wave * 20L; // one wave per second
@@ -358,8 +359,9 @@ public class DungeonInstance {
             double jx = Math.cos(angle) * jitter;
             double jz = Math.sin(angle) * jitter;
 
-            Location check = world.getHighestBlockAt(
-                    origin.clone().add(ox + jx, 0, oz + jz)).getLocation();
+            Location checkLoc = origin.clone().add(ox + jx, 0, oz + jz);
+            if (isNearExtractionPortal(checkLoc)) continue;
+            Location check = world.getHighestBlockAt(checkLoc).getLocation();
             Material m = check.getBlock().getType();
             if (!canInfect(m)) continue;
 
@@ -410,10 +412,11 @@ public class DungeonInstance {
             }
         }
 
-        // ── Fire burst — extra fire blocks scattered around impact ────────
-        for (int dx = -3; dx <= 3; dx++) {
-            for (int dz = -3; dz <= 3; dz++) {
-                if (rng.nextDouble() > 0.45) continue;
+        // ── Fire burst — sparse fire only at the crater centre ──────────
+        // Reduced significantly — just a small burst at impact, not a wide field
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                if (rng.nextDouble() > 0.25) continue; // 25% chance, was 45%
                 Location s = world.getHighestBlockAt(origin.clone().add(dx, 0, dz)).getLocation();
                 Location above = s.clone().add(0, 1, 0);
                 if (s.getBlock().getType().isSolid()
@@ -424,13 +427,13 @@ public class DungeonInstance {
         }
 
         // ── Thick tentacles ───────────────────────────────────────────────
-        // 4–6 arms, each 3 blocks wide (core + 2 flanks), 8–15 blocks long
-        int tentacleCount = 4 + rng.nextInt(3);
+        // 6–9 arms, each 3–5 blocks wide, 12–22 blocks long
+        int tentacleCount = 6 + rng.nextInt(4);
         for (int t = 0; t < tentacleCount; t++) {
             double angle   = (2 * Math.PI * t) / tentacleCount + (rng.nextDouble() - 0.5) * 0.7;
             double speedX  = Math.cos(angle);
             double speedZ  = Math.sin(angle);
-            int    length  = 8 + rng.nextInt(8);  // 8–15 blocks
+            int    length  = 12 + rng.nextInt(11); // 12–22 blocks
             boolean magma  = rng.nextBoolean();
             growTentacleStep(origin.clone(), speedX, speedZ, 0, length, magma, rng);
         }
@@ -481,10 +484,15 @@ public class DungeonInstance {
                 Material flankMat = rng.nextDouble() < 0.55 ? Material.SCULK : Material.MAGMA_BLOCK;
                 placeInfectionBlock(flank, flankMat, rng);
 
-                // Occasional extra outer flank — makes it 5 wide at random spots
-                if (rng.nextDouble() < 0.3) {
+                // Outer flanks more frequent — 55% chance, skulk-heavy for thickness
+                if (rng.nextDouble() < 0.55) {
                     Location outerFlank = next.clone().add(perpX * side * 2, 0, perpZ * side * 2);
                     placeInfectionBlock(outerFlank, Material.SCULK, rng);
+                }
+                // Occasional third layer — makes it 7 wide at key spots
+                if (rng.nextDouble() < 0.2) {
+                    Location thirdFlank = next.clone().add(perpX * side * 3, 0, perpZ * side * 3);
+                    placeInfectionBlock(thirdFlank, Material.SCULK, rng);
                 }
             }
 
@@ -500,6 +508,8 @@ public class DungeonInstance {
      * 8% chance to leave an air hole instead.
      */
     private void placeInfectionBlock(Location loc, Material mat, Random rng) {
+        // Never touch the extraction zone
+        if (isNearExtractionPortal(loc)) return;
         Location surface = world.getHighestBlockAt(loc).getLocation();
         Material existing = surface.getBlock().getType();
         if (!canInfect(existing)) return;
@@ -512,8 +522,8 @@ public class DungeonInstance {
 
         surface.getBlock().setType(mat, false);
 
-        // Fire above every magma block — burning tentacle trail
-        if (mat == Material.MAGMA_BLOCK) {
+        // Fire above magma blocks — sparse, only 20% chance per block
+        if (mat == Material.MAGMA_BLOCK && rng.nextDouble() < 0.20) {
             Location above = surface.clone().add(0, 1, 0);
             if (above.getBlock().getType() == Material.AIR) {
                 above.getBlock().setType(Material.FIRE, false);
@@ -527,6 +537,23 @@ public class DungeonInstance {
         String n = m.name();
         return !n.contains("LOG") && !n.contains("LEAVES") && !n.contains("CHEST")
             && !n.contains("SIGN") && !n.contains("SKULL") && !n.contains("SHULKER");
+    }
+
+    /**
+     * Returns true if a location is within the extraction zone safe radius.
+     * No skulk, magma, lightning, or fire should touch this area.
+     */
+    private boolean isNearExtractionPortal(Location loc) {
+        double ex     = DungeonRift.get().getConfig().getDouble("instance.extraction-portal.x", 0);
+        double ey     = DungeonRift.get().getConfig().getDouble("instance.extraction-portal.y", 64);
+        double ez     = DungeonRift.get().getConfig().getDouble("instance.extraction-portal.z", 0);
+        // Safe radius = extraction zone radius + 5 block buffer
+        double safeR  = DungeonRift.get().getConfig()
+                .getDouble("instance.extraction-zone-radius", 3.0) + 5.0;
+        double dx = loc.getX() - ex;
+        double dy = loc.getY() - ey;
+        double dz = loc.getZ() - ez;
+        return (dx * dx + dy * dy + dz * dz) <= (safeR * safeR);
     }
 
     // ── Boss bar ──────────────────────────────────────────────────────────────
