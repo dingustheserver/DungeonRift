@@ -71,6 +71,9 @@ public class DungeonInstance {
     /** Tracks seconds at which veins have already been spawned to avoid duplicates. */
     private final Set<Integer> veinSpawnedAt = new HashSet<>();
 
+    /** Original world time before collapse — restored when instance closes. */
+    private long originalWorldTime = -1;
+
     // ── Boss bar ──────────────────────────────────────────────────────────────
 
     private BossBar bossBar;
@@ -302,6 +305,25 @@ public class DungeonInstance {
                 }
             });
         }
+
+        // ── Sky reddening — shift world time toward blood-red sunset ────────
+        // Minecraft's sky is reddest around time 23000 (deep dusk/dawn).
+        // We interpolate from the original time toward 23000 as intensity rises.
+        // At intensity 1.0 (final seconds) the sky is at maximum blood red.
+        if (originalWorldTime < 0) {
+            originalWorldTime = world.getFullTime() % 24000;
+        }
+        // Target time: 23100 gives the deep blood-red sky (just past sunset)
+        long targetTime = 23100L;
+        long currentSkyTime = world.getFullTime() % 24000;
+        // Ease the current time toward the target proportional to intensity
+        long desiredTime = (long) (originalWorldTime + (targetTime - originalWorldTime) * intensity);
+        desiredTime = ((desiredTime % 24000) + 24000) % 24000;
+        // Only move time forward by up to 20 ticks per second to avoid jarring jumps
+        long delta = desiredTime - currentSkyTime;
+        if (delta < 0) delta += 24000;
+        long step = Math.min(delta, (long)(20 * intensity + 1));
+        world.setFullTime(world.getFullTime() + step);
 
         // ── Magma + skulk veins — appear at 90s, 60s, 30s once each ───────
         spawnVeinAtThreshold(150, intensity);
@@ -568,54 +590,30 @@ public class DungeonInstance {
     }
 
     /**
-     * Spawns a single collapse firework at the given location.
-     * Low intensity = crackle/star bursts; high intensity = large balls and blasts.
-     * Colors shift from orange/yellow (early) toward deep red/crimson (late).
+     * Plays firework explosion sound effects at the given location for all
+     * alive players. No visual firework entity is spawned — purely audio.
+     *
+     * Main sound: ENTITY_FIREWORK_ROCKET_BLAST (the boom)
+     * Occasional: ENTITY_FIREWORK_ROCKET_TWINKLE (crackle/sparkle aftermath)
+     *
+     * Volume is high (100f) so it carries across the entire instance world.
      */
     private void spawnCollapseFirework(Location loc, double intensity, Random rng) {
-        if (loc.getWorld() == null) return;
-
-        Firework fw = (Firework) loc.getWorld().spawnEntity(loc, org.bukkit.entity.EntityType.FIREWORK_ROCKET);
-        FireworkMeta meta = fw.getFireworkMeta();
-
-        // Color palette — early = orange/gold, late = dark red/crimson
-        Color[] earlyColors = { Color.ORANGE, Color.YELLOW, Color.fromRGB(255, 140, 0) };
-        Color[] lateColors  = { Color.RED, Color.fromRGB(180, 0, 0), Color.fromRGB(100, 0, 0), Color.MAROON };
-        Color[] fadeColors  = { Color.BLACK, Color.GRAY, Color.fromRGB(40, 0, 0) };
-
-        Color primary = intensity > 0.6
-                ? lateColors[rng.nextInt(lateColors.length)]
-                : earlyColors[rng.nextInt(earlyColors.length)];
-        Color fade    = fadeColors[rng.nextInt(fadeColors.length)];
-
-        // Effect type — crackle and star early, ball and burst late
-        FireworkEffect.Type type;
-        double typeRoll = rng.nextDouble();
-        if (intensity < 0.3) {
-            type = typeRoll < 0.6 ? FireworkEffect.Type.STAR : FireworkEffect.Type.CREEPER;
-        } else if (intensity < 0.6) {
-            type = typeRoll < 0.5 ? FireworkEffect.Type.BALL : FireworkEffect.Type.BURST;
-        } else {
-            type = typeRoll < 0.4 ? FireworkEffect.Type.BALL_LARGE
-                 : typeRoll < 0.7 ? FireworkEffect.Type.BURST
-                 : FireworkEffect.Type.CREEPER;
-        }
-
-        FireworkEffect effect = FireworkEffect.builder()
-                .withColor(primary)
-                .withFade(fade)
-                .with(type)
-                .trail(intensity > 0.5 && rng.nextBoolean())  // trail on high intensity
-                .flicker(rng.nextDouble() < 0.4)              // occasional twinkle
-                .build();
-
-        meta.addEffect(effect);
-        // Power 0 = explodes almost immediately at current position (no travel)
-        meta.setPower(0);
-        fw.setFireworkMeta(meta);
-
-        // Detonate instantly so it explodes in place rather than flying up
-        fw.detonate();
+        // Play the main explosion boom at the location for all alive players
+        alivePlayers.forEach(uuid -> {
+            Player p = Bukkit.getPlayer(uuid);
+            if (p == null) return;
+            // Boom — the main firework detonation
+            p.playSound(loc, Sound.ENTITY_FIREWORK_ROCKET_BLAST, 100.0f, 0.8f + (float)(rng.nextDouble() * 0.4f));
+            // 40% chance of crackle/twinkle sound shortly after — stagger by 3 ticks
+            if (rng.nextDouble() < 0.40) {
+                DungeonRift.get().getServer().getScheduler().runTaskLater(DungeonRift.get(), () -> {
+                    if (p.isOnline()) {
+                        p.playSound(loc, Sound.ENTITY_FIREWORK_ROCKET_TWINKLE, 80.0f, 0.9f + (float)(rng.nextDouble() * 0.2f));
+                    }
+                }, 3L);
+            }
+        });
     }
 
     private boolean canInfect(Material m) {
@@ -823,6 +821,10 @@ public class DungeonInstance {
         world.setThundering(false);
         world.setWeatherDuration(0);
         world.setThunderDuration(0);
+        // Reset sky time — world is about to be deleted but clean up anyway
+        if (originalWorldTime >= 0) {
+            world.setFullTime(world.getFullTime() - (world.getFullTime() % 24000) + originalWorldTime);
+        }
 
         new HashSet<>(alivePlayers).forEach(uuid -> {
             Player p = Bukkit.getPlayer(uuid);
